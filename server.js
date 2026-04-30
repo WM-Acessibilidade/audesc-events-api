@@ -29,7 +29,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v3-verificacao-email'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v4-admin-painel'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -70,4 +70,65 @@ async function liberar(req,res){
 }
 app.post('/liberar-evento/:id',liberar);
 app.get('/liberar-evento/:id',liberar);
+
+app.get('/admin/eventos', async (req, res) => {
+  try {
+    if (!admin(req, res)) return;
+    const sb = getSupabase();
+    const { data, error } = await sb
+      .from('eventos')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (error) throw error;
+    res.json({ ok: true, eventos: data || [] });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Erro ao listar eventos.' });
+  }
+});
+
+app.patch('/admin/eventos/:id', async (req, res) => {
+  try {
+    if (!admin(req, res)) return;
+    const allowed = [
+      'status_publicacao',
+      'status_pagamento',
+      'status_operacao',
+      'titulo_publicado',
+      'descricao_publicada',
+      'site_oficial',
+      'link_ingressos',
+      'link_programacao',
+      'link_acessibilidade',
+      'data_evento',
+      'duracao_horas',
+      'max_ouvintes',
+      'tipo_servico',
+      'tipo_evento'
+    ];
+    const update = {};
+    for (const key of allowed) {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) {
+        update[key] = req.body[key];
+      }
+    }
+    update.editado_por_admin = true;
+    update.data_ultima_edicao = new Date().toISOString();
+
+    const { data, error } = await getSupabase()
+      .from('eventos')
+      .update(update)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ ok: true, evento: data });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Erro ao atualizar evento.' });
+  }
+});
+
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));

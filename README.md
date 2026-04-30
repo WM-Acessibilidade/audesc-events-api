@@ -1,1 +1,1 @@
-Audesc Events API v3: /criar-evento exige e-mail verificado via Supabase Auth.
+Audesc Events API v4: inclui painel admin endpoints /admin/eventos e /admin/eventos/:id.
