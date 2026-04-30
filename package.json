@@ -1,7 +1,6 @@
 {
-  "name": "audesc-integrador-eventos",
-  "version": "1.0.0",
-  "description": "Serviço para liberar eventos do Supabase e gravar acessos na planilha Google Sheets do Audesc.",
+  "name": "audesc-events-api",
+  "version": "3.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

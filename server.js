@@ -6,203 +6,68 @@ const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const PORT = process.env.PORT || 3000;
-
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
-
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 const SHEET_NAME = process.env.SHEET_NAME || 'eventos';
 
-function normalizarTexto(value) {
-  return String(value || '').trim();
-}
+function text(v){ return String(v || '').trim(); }
+function limit(v,n){ return text(v).slice(0,n); }
+function safeUrl(v){ const u=text(v); if(!u) return ''; try{ const p=new URL(u); return p.protocol==='https:'?p.toString():'';}catch{return '';} }
+function getSupabase(){ if(!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error('Supabase não configurado.'); return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY); }
+async function getUser(req){ const h=req.headers.authorization||''; const token=h.startsWith('Bearer ')?h.slice(7):''; if(!token) return null; const {data,error}=await getSupabase().auth.getUser(token); if(error || !data || !data.user) return null; return data.user; }
+function password8(){ const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(let i=0;i<8;i++) s+=c[crypto.randomInt(0,c.length)]; return s; }
+function makeRoom(title){ const b=text(title).toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,30)||'evento'; return 'audesc-'+b+'-'+crypto.randomBytes(3).toString('hex'); }
+async function getSheets(){ if(!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) throw new Error('Google Sheets não configurado.'); const auth=new google.auth.JWT({email:GOOGLE_CLIENT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']}); return google.sheets({version:'v4',auth}); }
+function endDate(start,hours){ const d=start?new Date(start):new Date(); return new Date(d.getTime()+Number(hours||2)*3600000).toISOString(); }
+async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
+function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-function gerarSenha(tamanho = 8) {
-  const alfabeto = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let senha = '';
-  for (let i = 0; i < tamanho; i++) {
-    senha += alfabeto[crypto.randomInt(0, alfabeto.length)];
-  }
-  return senha;
-}
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v3-verificacao-email'}));
 
-function gerarSala(titulo) {
-  const base = normalizarTexto(titulo)
-    .toLowerCase()
-    .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 30) || 'evento';
-  return 'audesc-' + base + '-' + crypto.randomBytes(3).toString('hex');
-}
-
-function calcularFim(dataEvento, duracaoHoras) {
-  if (!dataEvento) return '2026-12-31T23:59:59-03:00';
-  const inicio = new Date(dataEvento);
-  const horas = Number(duracaoHoras || 2);
-  const fim = new Date(inicio.getTime() + horas * 60 * 60 * 1000);
-  return fim.toISOString();
-}
-
-function getSupabase() {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error('SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY precisam estar configurados.');
-  }
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-}
-
-async function getSheets() {
-  if (!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
-    throw new Error('Variáveis do Google Sheets não configuradas.');
-  }
-
-  const auth = new google.auth.JWT({
-    email: GOOGLE_CLIENT_EMAIL,
-    key: GOOGLE_PRIVATE_KEY,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets']
-  });
-
-  return google.sheets({ version: 'v4', auth });
-}
-
-async function adicionarLinhaNaPlanilha(evento, senha, sala) {
-  const sheets = await getSheets();
-
-  const titulo = evento.titulo_publicado || evento.titulo_original || 'Evento Audesc';
-  const inicio = evento.data_evento || new Date().toISOString();
-  const fim = calcularFim(inicio, evento.duracao_horas);
-
-  const linha = [
-    senha,
-    sala,
-    titulo,
-    evento.max_ouvintes || 20,
-    evento.duracao_horas || 2,
-    inicio,
-    fim,
-    'ativo',
-    'sim',
-    10,
-    '',
-    '',
-    '',
-    ''
-  ];
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    range: `${SHEET_NAME}!A:N`,
-    valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: {
-      values: [linha]
-    }
-  });
-}
-
-function checarAdmin(req, res) {
-  const token = req.headers['x-admin-token'] || req.query.admin_token;
-  if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
-    res.status(403).json({ error: 'Acesso administrativo não autorizado.' });
-    return false;
-  }
-  return true;
-}
-
-app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'audesc-integrador-eventos', version: 'v1' });
+app.post('/criar-evento', async (req,res)=>{
+ try{
+  const user=await getUser(req);
+  if(!user) return res.status(401).json({error:'E-mail ainda não verificado. Solicite e confirme o código antes de cadastrar o evento.'});
+  const b=req.body||{};
+  if(text(b.website)) return res.status(400).json({error:'Solicitação inválida.'});
+  const tipo_servico=text(b.tipo_servico)==='divulgacao_gratuita'?'divulgacao_gratuita':'audesc_transmissao';
+  const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
+  const titulo=limit(b.titulo_original,200);
+  if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
+  const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
+  const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:tipo_evento==='publico'?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
+  const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
+  if(error) throw error;
+  res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data});
+ }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao cadastrar evento.'}); }
 });
 
-async function liberarEvento(req, res) {
-  try {
-    if (!checarAdmin(req, res)) return;
-
-    const id = req.params.id;
-    const supabase = getSupabase();
-
-    const { data: evento, error } = await supabase
-      .from('eventos')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error || !evento) {
-      return res.status(404).json({ error: 'Evento não encontrado.' });
-    }
-
-    if (evento.status_publicacao !== 'aprovado') {
-      return res.status(400).json({ error: 'Evento ainda não está aprovado.' });
-    }
-
-    if (evento.tipo_servico === 'audesc_transmissao' && evento.status_pagamento !== 'pago') {
-      return res.status(400).json({ error: 'Evento ainda não consta como pago.' });
-    }
-
-    if (evento.tipo_servico === 'divulgacao_gratuita') {
-      const { data: atualizado, error: updateError } = await supabase
-        .from('eventos')
-        .update({
-          status_operacao: 'liberado',
-          data_ultima_edicao: new Date().toISOString()
-        })
-        .eq('id', id)
-        .select()
-        .single();
-
-      if (updateError) throw updateError;
-
-      return res.json({
-        ok: true,
-        tipo: 'divulgacao_gratuita',
-        evento: atualizado
-      });
-    }
-
-    const senha = evento.senha_transmissor || gerarSenha(8);
-    const sala = evento.sala_codigo || gerarSala(evento.titulo_publicado || evento.titulo_original);
-
-    await adicionarLinhaNaPlanilha(evento, senha, sala);
-
-    const { data: atualizado, error: updateError } = await supabase
-      .from('eventos')
-      .update({
-        senha_transmissor: senha,
-        sala_codigo: sala,
-        status_operacao: 'liberado',
-        data_ultima_edicao: new Date().toISOString()
-      })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (updateError) throw updateError;
-
-    return res.json({
-      ok: true,
-      tipo: 'audesc_transmissao',
-      senha_transmissor: senha,
-      sala_codigo: sala,
-      evento: atualizado
-    });
-
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: error.message || 'Erro ao liberar evento.' });
+async function liberar(req,res){
+ try{
+  if(!admin(req,res)) return;
+  const sb=getSupabase();
+  const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
+  if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
+  if(ev.status_publicacao!=='aprovado') return res.status(400).json({error:'Evento ainda não está aprovado.'});
+  if(ev.tipo_servico==='audesc_transmissao' && ev.status_pagamento!=='pago') return res.status(400).json({error:'Evento ainda não consta como pago.'});
+  if(ev.tipo_servico==='divulgacao_gratuita'){
+   const {data:up,error:er}=await sb.from('eventos').update({status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
+   if(er) throw er; return res.json({ok:true,tipo:'divulgacao_gratuita',evento:up});
   }
+  const senha=ev.senha_transmissor||password8(); const sala=ev.sala_codigo||makeRoom(ev.titulo_publicado||ev.titulo_original);
+  await appendSheet(ev,senha,sala);
+  const {data:up,error:er}=await sb.from('eventos').update({senha_transmissor:senha,sala_codigo:sala,status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
+  if(er) throw er; res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,evento:up});
+ }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao liberar evento.'}); }
 }
-
-app.post('/liberar-evento/:id', liberarEvento);
-
-// endpoint GET para facilitar teste manual pelo navegador, protegido por admin_token
-app.get('/liberar-evento/:id', liberarEvento);
-
-app.listen(PORT, () => {
-  console.log(`Audesc Integrador de Eventos rodando na porta ${PORT}`);
-});
+app.post('/liberar-evento/:id',liberar);
+app.get('/liberar-evento/:id',liberar);
+app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));
