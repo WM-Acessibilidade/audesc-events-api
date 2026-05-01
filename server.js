@@ -29,7 +29,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v4-admin-painel'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v5-localizacao'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -43,7 +43,9 @@ app.post('/criar-evento', async (req,res)=>{
   if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:tipo_evento==='publico'?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:tipo_evento==='publico'?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
+      uf: text(b.pais)==='Brasil' ? text(b.uf) : '',
+      data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
   res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data});
@@ -105,7 +107,9 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'duracao_horas',
       'max_ouvintes',
       'tipo_servico',
-      'tipo_evento'
+      'tipo_evento',
+      'pais',
+      'uf'
     ];
     const update = {};
     for (const key of allowed) {
