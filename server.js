@@ -36,7 +36,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v6-codigos-curtos'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v7-publico-notificacoes'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -161,6 +161,25 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     console.error(e);
     res.status(500).json({ error: e.message || 'Erro ao atualizar evento.' });
   }
+});
+
+
+app.get('/public/eventos', async (req,res)=>{
+ try{
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  if(error) throw error; res.json({ok:true,eventos:data||[]});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
+});
+
+app.post('/notificacoes/preferencias', async (req,res)=>{
+ try{
+  const user=await getUser(req);
+  if(!user) return res.status(401).json({error:'E-mail ainda não verificado.'});
+  const b=req.body||{};
+  const payload={user_id:user.id,email:user.email,receber_todos:!!b.receber_todos,pais:text(b.pais),uf:text(b.uf),eventos_ids:Array.isArray(b.eventos_ids)?b.eventos_ids:[],ativo:true,updated_at:new Date().toISOString()};
+  const {data,error}=await getSupabase().from('notificacoes').upsert(payload,{onConflict:'user_id'}).select().single();
+  if(error) throw error; res.json({ok:true,preferencias:data});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar preferências.'})}
 });
 
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));
