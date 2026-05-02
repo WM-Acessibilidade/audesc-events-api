@@ -36,7 +36,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v7-publico-notificacoes'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v8-notificacoes-validadas'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -171,15 +171,37 @@ app.get('/public/eventos', async (req,res)=>{
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
 
-app.post('/notificacoes/preferencias', async (req,res)=>{
+
+app.post('/notificacoes/solicitar', async (req,res)=>{
+ try{
+  const b=req.body||{};
+  if(text(b.website)) return res.status(400).json({error:'Solicitação inválida.'});
+  const email=text(b.email).toLowerCase();
+  if(!email || !email.includes('@')) return res.status(400).json({error:'Informe um e-mail válido.'});
+  const payload={email,receber_todos:!!b.receber_todos,pais:text(b.pais),uf:text(b.uf),eventos_ids:Array.isArray(b.eventos_ids)?b.eventos_ids:[],updated_at:new Date().toISOString()};
+  const sb=getSupabase();
+  const {data:existing,error:findError}=await sb.from('notificacoes').select('*').eq('email',email).maybeSingle();
+  if(findError) throw findError;
+  if(existing && existing.email_validado===true){
+    const {data,error}=await sb.from('notificacoes').update({...payload,ativo:true,email_validado:true}).eq('email',email).select().single();
+    if(error) throw error;
+    return res.json({ok:true,ja_validado:true,mensagem:'E-mail já validado. Preferências atualizadas.',preferencias:data});
+  }
+  const {data,error}=await sb.from('notificacoes').upsert({...payload,ativo:false,email_validado:false},{onConflict:'email'}).select().single();
+  if(error) throw error;
+  res.json({ok:true,ja_validado:false,mensagem:'Preferências salvas. Envie o link de validação.',preferencias:data});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao solicitar notificações.'})}
+});
+
+app.post('/notificacoes/ativar', async (req,res)=>{
  try{
   const user=await getUser(req);
-  if(!user) return res.status(401).json({error:'E-mail ainda não verificado.'});
-  const b=req.body||{};
-  const payload={user_id:user.id,email:user.email,receber_todos:!!b.receber_todos,pais:text(b.pais),uf:text(b.uf),eventos_ids:Array.isArray(b.eventos_ids)?b.eventos_ids:[],ativo:true,updated_at:new Date().toISOString()};
-  const {data,error}=await getSupabase().from('notificacoes').upsert(payload,{onConflict:'user_id'}).select().single();
-  if(error) throw error; res.json({ok:true,preferencias:data});
- }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar preferências.'})}
+  if(!user || !user.email) return res.status(401).json({error:'E-mail não validado.'});
+  const email=String(user.email).toLowerCase();
+  const {data,error}=await getSupabase().from('notificacoes').update({user_id:user.id,email_validado:true,ativo:true,updated_at:new Date().toISOString()}).eq('email',email).select().single();
+  if(error) throw error;
+  res.json({ok:true,mensagem:'E-mail validado e notificações ativadas.',preferencias:data});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao ativar notificações.'})}
 });
 
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));
