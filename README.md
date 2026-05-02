@@ -1,7 +1,8 @@
-Audesc Events API v5 - localização
+Audesc Events API v6 - códigos curtos
 
-Antes de usar, rode no Supabase:
+Mudanças:
+- sala automática no padrão audesc0000 a audesc9999;
+- senha automática com 6 caracteres alfanuméricos;
+- verificação no Supabase para evitar repetição antes de salvar.
 
-alter table public.eventos
-add column if not exists pais text,
-add column if not exists uf text;
+Substitua server.js, package.json e README.md no repositório audesc-events-api e faça deploy no Render.

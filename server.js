@@ -22,14 +22,21 @@ function limit(v,n){ return text(v).slice(0,n); }
 function safeUrl(v){ const u=text(v); if(!u) return ''; try{ const p=new URL(u); return p.protocol==='https:'?p.toString():'';}catch{return '';} }
 function getSupabase(){ if(!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error('Supabase não configurado.'); return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY); }
 async function getUser(req){ const h=req.headers.authorization||''; const token=h.startsWith('Bearer ')?h.slice(7):''; if(!token) return null; const {data,error}=await getSupabase().auth.getUser(token); if(error || !data || !data.user) return null; return data.user; }
-function password8(){ const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(let i=0;i<8;i++) s+=c[crypto.randomInt(0,c.length)]; return s; }
-function makeRoom(title){ const b=text(title).toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,30)||'evento'; return 'audesc-'+b+'-'+crypto.randomBytes(3).toString('hex'); }
+function password6(){
+  const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s='';
+  for(let i=0;i<6;i++) s+=c[crypto.randomInt(0,c.length)];
+  return s;
+}
+function makeRoom(){
+  return 'audesc' + String(crypto.randomInt(0, 10000)).padStart(4, '0');
+}
 async function getSheets(){ if(!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) throw new Error('Google Sheets não configurado.'); const auth=new google.auth.JWT({email:GOOGLE_CLIENT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']}); return google.sheets({version:'v4',auth}); }
 function endDate(start,hours){ const d=start?new Date(start):new Date(); return new Date(d.getTime()+Number(hours||2)*3600000).toISOString(); }
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v5-localizacao'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v6-codigos-curtos'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -52,6 +59,27 @@ app.post('/criar-evento', async (req,res)=>{
  }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao cadastrar evento.'}); }
 });
 
+
+async function gerarSenhaUnica(sb){
+  for(let i=0;i<30;i++){
+    const senha = password6();
+    const { data, error } = await sb.from('eventos').select('id').eq('senha_transmissor', senha).limit(1);
+    if(error) throw error;
+    if(!data || data.length === 0) return senha;
+  }
+  throw new Error('Não foi possível gerar senha única.');
+}
+
+async function gerarSalaUnica(sb){
+  for(let i=0;i<30;i++){
+    const sala = makeRoom();
+    const { data, error } = await sb.from('eventos').select('id').eq('sala_codigo', sala).limit(1);
+    if(error) throw error;
+    if(!data || data.length === 0) return sala;
+  }
+  throw new Error('Não foi possível gerar código de sala único.');
+}
+
 async function liberar(req,res){
  try{
   if(!admin(req,res)) return;
@@ -64,7 +92,7 @@ async function liberar(req,res){
    const {data:up,error:er}=await sb.from('eventos').update({status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
    if(er) throw er; return res.json({ok:true,tipo:'divulgacao_gratuita',evento:up});
   }
-  const senha=ev.senha_transmissor||password8(); const sala=ev.sala_codigo||makeRoom(ev.titulo_publicado||ev.titulo_original);
+  const senha=ev.senha_transmissor||await gerarSenhaUnica(sb); const sala=ev.sala_codigo||await gerarSalaUnica(sb);
   await appendSheet(ev,senha,sala);
   const {data:up,error:er}=await sb.from('eventos').update({senha_transmissor:senha,sala_codigo:sala,status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
   if(er) throw er; res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,evento:up});
