@@ -26,3 +26,9 @@ add column if not exists email_validado boolean default false;
 
 create unique index if not exists notificacoes_email_unique
 on public.notificacoes (email);
+
+
+v9 unidade administrativa:
+- Corrige o backend para salvar o campo uf para todos os países lusófonos.
+- Antes, a API salvava uf apenas quando pais = Brasil.
+- Agora, a API limpa uf somente quando pais = Outros.

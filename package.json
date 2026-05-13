@@ -1,6 +1,6 @@
 {
   "name": "audesc-events-api",
-  "version": "8.0.0",
+  "version": "9.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -14,5 +14,5 @@
   "engines": {
     "node": ">=18"
   },
-  "description": "API Audesc com notificações por e-mail validado."
+  "description": "API Audesc corrigida para salvar unidades administrativas de todos os países lusófonos."
 }
