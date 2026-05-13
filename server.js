@@ -29,14 +29,20 @@ function password6(){
   return s;
 }
 function makeRoom(){
-  return 'audesc' + String(crypto.randomInt(0, 10000)).padStart(4, '0');
+  const caracteres = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const numero = String(crypto.randomInt(0, 10));
+  let sufixo = '';
+  for(let i=0;i<3;i++){
+    sufixo += caracteres[crypto.randomInt(0, caracteres.length)];
+  }
+  return 'audesc' + numero + sufixo;
 }
 async function getSheets(){ if(!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) throw new Error('Google Sheets não configurado.'); const auth=new google.auth.JWT({email:GOOGLE_CLIENT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']}); return google.sheets({version:'v4',auth}); }
 function endDate(start,hours){ const d=start?new Date(start):new Date(); return new Date(d.getTime()+Number(hours||2)*3600000).toISOString(); }
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v9-unidade-admin'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v10-salas-exclusao'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -202,6 +208,19 @@ app.post('/notificacoes/ativar', async (req,res)=>{
   if(error) throw error;
   res.json({ok:true,mensagem:'E-mail validado e notificações ativadas.',preferencias:data});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao ativar notificações.'})}
+});
+
+
+app.delete('/admin/eventos/:id', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const { error } = await getSupabase().from('eventos').delete().eq('id', req.params.id);
+  if(error) throw error;
+  res.json({ok:true,mensagem:'Evento excluído definitivamente.'});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao excluir evento.'});
+ }
 });
 
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));

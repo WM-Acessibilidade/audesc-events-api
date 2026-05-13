@@ -32,3 +32,9 @@ v9 unidade administrativa:
 - Corrige o backend para salvar o campo uf para todos os países lusófonos.
 - Antes, a API salvava uf apenas quando pais = Brasil.
 - Agora, a API limpa uf somente quando pais = Outros.
+
+
+v10:
+- Novo código de sala: audesc + 1 algarismo + 3 caracteres alfanuméricos. Exemplo: audesc7K2P.
+- Mantém verificação de unicidade.
+- Adiciona DELETE /admin/eventos/:id para exclusão definitiva de eventos.
