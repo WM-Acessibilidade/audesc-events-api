@@ -1,6 +1,6 @@
 {
   "name": "audesc-events-api",
-  "version": "10.0.0",
+  "version": "11.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -14,5 +14,5 @@
   "engines": {
     "node": ">=18"
   },
-  "description": "API Audesc com novo padrão de sala e exclusão administrativa."
+  "description": "API Audesc com envio automático de e-mail via Resend ao liberar evento."
 }

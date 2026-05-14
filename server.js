@@ -16,6 +16,9 @@ const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 const SHEET_NAME = process.env.SHEET_NAME || 'eventos';
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+const AUDESC_SITE_URL = process.env.AUDESC_SITE_URL || 'https://wm-acessibilidade.github.io/audesc/';
 
 function text(v){ return String(v || '').trim(); }
 function limit(v,n){ return text(v).slice(0,n); }
@@ -42,7 +45,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v10-salas-exclusao'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v11-email-resend'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -86,6 +89,111 @@ async function gerarSalaUnica(sb){
   throw new Error('Não foi possível gerar código de sala único.');
 }
 
+
+function escapeEmailHtml(v){
+  return String(v || '').replace(/[&<>"']/g, ch => ({
+    '&':'&amp;',
+    '<':'&lt;',
+    '>':'&gt;',
+    '"':'&quot;',
+    "'":'&#039;'
+  }[ch]));
+}
+
+function montarEmailLiberacao(ev, senha, sala){
+  const titulo = ev.titulo_publicado || ev.titulo_original || 'Evento Audesc';
+  const dataEvento = ev.data_evento ? new Date(ev.data_evento).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '';
+  const duracao = ev.duracao_horas ? `${ev.duracao_horas} hora(s)` : '';
+  const maxOuvintes = ev.max_ouvintes ? `${ev.max_ouvintes} ouvinte(s)` : '';
+  const subject = `Audesc: acesso liberado para ${titulo}`;
+
+  const text = `Olá!
+
+O acesso do seu evento foi liberado no Audesc.
+
+Evento: ${titulo}
+Código da sala: ${sala}
+Senha do transmissor: ${senha}
+${dataEvento ? `Data e horário: ${dataEvento}\n` : ''}${duracao ? `Duração: ${duracao}\n` : ''}${maxOuvintes ? `Máximo de ouvintes simultâneos: ${maxOuvintes}\n` : ''}
+
+Acesse o Audesc:
+${AUDESC_SITE_URL}
+
+Instruções básicas:
+1. Entre na página do Audesc.
+2. Informe a senha do transmissor quando for abrir a transmissão.
+3. Compartilhe com os ouvintes apenas o acesso de ouvinte, não a senha do transmissor.
+4. A senha do transmissor é de uso restrito da pessoa responsável pela transmissão.
+
+Atenciosamente,
+Equipe Audesc`;
+
+  const html = `
+  <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111;">
+    <h1>Audesc: acesso liberado</h1>
+    <p>Olá!</p>
+    <p>O acesso do seu evento foi liberado no Audesc.</p>
+    <h2>Dados do evento</h2>
+    <p><strong>Evento:</strong> ${escapeEmailHtml(titulo)}</p>
+    <p><strong>Código da sala:</strong> ${escapeEmailHtml(sala)}</p>
+    <p><strong>Senha do transmissor:</strong> ${escapeEmailHtml(senha)}</p>
+    ${dataEvento ? `<p><strong>Data e horário:</strong> ${escapeEmailHtml(dataEvento)}</p>` : ''}
+    ${duracao ? `<p><strong>Duração:</strong> ${escapeEmailHtml(duracao)}</p>` : ''}
+    ${maxOuvintes ? `<p><strong>Máximo de ouvintes simultâneos:</strong> ${escapeEmailHtml(maxOuvintes)}</p>` : ''}
+    <p><a href="${escapeEmailHtml(AUDESC_SITE_URL)}">Acessar o Audesc</a></p>
+    <h2>Instruções básicas</h2>
+    <ol>
+      <li>Entre na página do Audesc.</li>
+      <li>Informe a senha do transmissor quando for abrir a transmissão.</li>
+      <li>Compartilhe com os ouvintes apenas o acesso de ouvinte, não a senha do transmissor.</li>
+      <li>A senha do transmissor é de uso restrito da pessoa responsável pela transmissão.</li>
+    </ol>
+    <p>Atenciosamente,<br>Equipe Audesc</p>
+  </div>`;
+
+  return { subject, text, html };
+}
+
+async function enviarEmailLiberacao(ev, senha, sala){
+  if(!RESEND_API_KEY){
+    console.warn('RESEND_API_KEY não configurada. E-mail não enviado.');
+    return { ok:false, skipped:true, reason:'RESEND_API_KEY ausente' };
+  }
+
+  if(!ev.email_usuario){
+    console.warn('Evento sem email_usuario. E-mail não enviado.');
+    return { ok:false, skipped:true, reason:'email_usuario ausente' };
+  }
+
+  const conteudo = montarEmailLiberacao(ev, senha, sala);
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: RESEND_FROM_EMAIL,
+      to: ev.email_usuario,
+      subject: conteudo.subject,
+      text: conteudo.text,
+      html: conteudo.html
+    })
+  });
+
+  const body = await response.json().catch(() => ({}));
+
+  if(!response.ok){
+    console.error('Erro ao enviar e-mail via Resend:', body);
+    return { ok:false, status:response.status, error:body };
+  }
+
+  console.log('E-mail de liberação enviado:', body);
+  return { ok:true, response:body };
+}
+
+
 async function liberar(req,res){
  try{
   if(!admin(req,res)) return;
@@ -101,7 +209,12 @@ async function liberar(req,res){
   const senha=ev.senha_transmissor||await gerarSenhaUnica(sb); const sala=ev.sala_codigo||await gerarSalaUnica(sb);
   await appendSheet(ev,senha,sala);
   const {data:up,error:er}=await sb.from('eventos').update({senha_transmissor:senha,sala_codigo:sala,status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
-  if(er) throw er; res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,evento:up});
+  if(er) throw er;
+  const email_resultado = await enviarEmailLiberacao(up, senha, sala).catch(err => {
+    console.error('Falha inesperada ao enviar e-mail de liberação:', err);
+    return { ok:false, error:String(err && err.message ? err.message : err) };
+  });
+  res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,email_resultado,evento:up});
  }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao liberar evento.'}); }
 }
 app.post('/liberar-evento/:id',liberar);

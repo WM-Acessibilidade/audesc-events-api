@@ -38,3 +38,13 @@ v10:
 - Novo código de sala: audesc + 1 algarismo + 3 caracteres alfanuméricos. Exemplo: audesc7K2P.
 - Mantém verificação de unicidade.
 - Adiciona DELETE /admin/eventos/:id para exclusão definitiva de eventos.
+
+
+v11 e-mail Resend:
+- Envia e-mail automático ao responsável quando um evento de transmissão Audesc é liberado.
+- Variáveis de ambiente necessárias no Render:
+  RESEND_API_KEY
+  RESEND_FROM_EMAIL
+  AUDESC_SITE_URL
+- O envio de e-mail não bloqueia a liberação do evento.
+- A resposta da API inclui email_resultado.
