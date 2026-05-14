@@ -48,3 +48,16 @@ v11 e-mail Resend:
   AUDESC_SITE_URL
 - O envio de e-mail não bloqueia a liberação do evento.
 - A resposta da API inclui email_resultado.
+
+
+v12 e-mail admin:
+- Permite liberar evento sem enviar e-mail automático.
+- Registra status do e-mail no evento, se as colunas existirem.
+- Adiciona POST /admin/eventos/:id/reenviar-email.
+
+SQL recomendado no Supabase:
+
+alter table public.eventos
+add column if not exists email_liberacao_status text,
+add column if not exists email_liberacao_enviado_em timestamp with time zone,
+add column if not exists email_liberacao_erro text;

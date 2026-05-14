@@ -45,7 +45,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v11-email-resend'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v12-email-admin'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -194,6 +194,22 @@ async function enviarEmailLiberacao(ev, senha, sala){
 }
 
 
+
+async function registrarResultadoEmail(eventoId, resultado){
+  const status = resultado && resultado.ok ? 'enviado' : (resultado && resultado.skipped ? 'nao_enviado' : 'erro');
+  const erro = resultado && resultado.ok ? null : JSON.stringify(resultado || {});
+  try{
+    await getSupabase().from('eventos').update({
+      email_liberacao_status: status,
+      email_liberacao_enviado_em: resultado && resultado.ok ? new Date().toISOString() : null,
+      email_liberacao_erro: erro,
+      data_ultima_edicao: new Date().toISOString()
+    }).eq('id', eventoId);
+  }catch(e){
+    console.warn('Não foi possível registrar o resultado do e-mail. Verifique as colunas no Supabase:', e.message || e);
+  }
+}
+
 async function liberar(req,res){
  try{
   if(!admin(req,res)) return;
@@ -207,13 +223,23 @@ async function liberar(req,res){
    if(er) throw er; return res.json({ok:true,tipo:'divulgacao_gratuita',evento:up});
   }
   const senha=ev.senha_transmissor||await gerarSenhaUnica(sb); const sala=ev.sala_codigo||await gerarSalaUnica(sb);
+  const enviarEmailLiberacaoAdmin = !(
+    req.query?.enviar_email === 'false' ||
+    req.query?.sem_email === 'true' ||
+    req.body?.enviar_email === false ||
+    req.body?.sem_email === true
+  );
   await appendSheet(ev,senha,sala);
   const {data:up,error:er}=await sb.from('eventos').update({senha_transmissor:senha,sala_codigo:sala,status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
   if(er) throw er;
-  const email_resultado = await enviarEmailLiberacao(up, senha, sala).catch(err => {
-    console.error('Falha inesperada ao enviar e-mail de liberação:', err);
-    return { ok:false, error:String(err && err.message ? err.message : err) };
-  });
+  let email_resultado = { ok:false, skipped:true, reason:'Envio automático desmarcado pelo administrador.' };
+  if(enviarEmailLiberacaoAdmin){
+    email_resultado = await enviarEmailLiberacao(up, senha, sala).catch(err => {
+      console.error('Falha inesperada ao enviar e-mail de liberação:', err);
+      return { ok:false, error:String(err && err.message ? err.message : err) };
+    });
+  }
+  await registrarResultadoEmail(up.id, email_resultado);
   res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,email_resultado,evento:up});
  }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao liberar evento.'}); }
 }
@@ -333,6 +359,28 @@ app.delete('/admin/eventos/:id', async (req,res)=>{
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message||'Erro ao excluir evento.'});
+ }
+});
+
+
+app.post('/admin/eventos/:id/reenviar-email', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const {data:ev,error}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).single();
+  if(error) throw error;
+  if(!ev) return res.status(404).json({error:'Evento não encontrado.'});
+  if(ev.tipo_servico !== 'audesc_transmissao') return res.status(400).json({error:'Este evento não é de transmissão Audesc.'});
+  if(!ev.sala_codigo || !ev.senha_transmissor) return res.status(400).json({error:'Evento ainda não possui sala e senha. Libere o evento antes de reenviar o e-mail.'});
+
+  const email_resultado = await enviarEmailLiberacao(ev, ev.senha_transmissor, ev.sala_codigo).catch(err => {
+    console.error('Falha inesperada ao reenviar e-mail:', err);
+    return { ok:false, error:String(err && err.message ? err.message : err) };
+  });
+  await registrarResultadoEmail(ev.id, email_resultado);
+  res.json({ok:true,email_resultado});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao reenviar e-mail.'});
  }
 });
 
