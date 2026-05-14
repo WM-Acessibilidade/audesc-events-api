@@ -45,7 +45,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v13-meus-eventos'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v14-meus-eventos-seguro'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -385,10 +385,15 @@ app.post('/admin/eventos/:id/reenviar-email', async (req,res)=>{
 });
 
 
+
 app.get('/meus-eventos', async (req,res)=>{
  try{
-  const email = String(req.query.email || '').trim().toLowerCase();
-  if(!email) return res.status(400).json({error:'E-mail não informado.'});
+  const user = await getUser(req);
+  if(!user || !user.email){
+   return res.status(401).json({error:'E-mail não autenticado. Acesse pelo link de validação.'});
+  }
+
+  const email = String(user.email || '').trim().toLowerCase();
 
   const {data,error} = await getSupabase()
    .from('eventos')
@@ -398,11 +403,12 @@ app.get('/meus-eventos', async (req,res)=>{
 
   if(error) throw error;
 
-  res.json({ok:true,total:data.length,eventos:data});
+  res.json({ok:true,email,total:data.length,eventos:data});
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message || 'Erro ao carregar eventos.'});
  }
 });
+
 
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));

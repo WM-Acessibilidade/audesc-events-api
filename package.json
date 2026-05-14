@@ -1,6 +1,6 @@
 {
   "name": "audesc-events-api",
-  "version": "13.0.0",
+  "version": "14.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -14,5 +14,5 @@
   "engines": {
     "node": ">=18"
   },
-  "description": "API Audesc com controle administrativo de envio e reenvio de e-mails."
+  "description": "API Audesc com Meus Eventos seguro por token Supabase."
 }

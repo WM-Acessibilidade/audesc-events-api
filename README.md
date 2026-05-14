@@ -61,3 +61,9 @@ alter table public.eventos
 add column if not exists email_liberacao_status text,
 add column if not exists email_liberacao_enviado_em timestamp with time zone,
 add column if not exists email_liberacao_erro text;
+
+
+v14 Meus Eventos seguro:
+- GET /meus-eventos não aceita mais e-mail por query string.
+- Exige Authorization: Bearer <token Supabase>.
+- A API identifica o e-mail pelo token validado.
