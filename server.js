@@ -19,6 +19,10 @@ const SHEET_NAME = process.env.SHEET_NAME || 'eventos';
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
 const AUDESC_SITE_URL = process.env.AUDESC_SITE_URL || 'https://wm-acessibilidade.github.io/audesc/';
+const PADDLE_API_KEY = process.env.PADDLE_API_KEY;
+const PADDLE_PRICE_ID = process.env.PADDLE_PRICE_ID;
+const PADDLE_ENV = process.env.PADDLE_ENV || 'sandbox';
+const PADDLE_API_BASE = PADDLE_ENV === 'live' ? 'https://api.paddle.com' : 'https://sandbox-api.paddle.com';
 
 function text(v){ return String(v || '').trim(); }
 function limit(v,n){ return text(v).slice(0,n); }
@@ -45,7 +49,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v14-meus-eventos-seguro'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v15-paddle'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -410,5 +414,81 @@ app.get('/meus-eventos', async (req,res)=>{
  }
 });
 
+
+
+app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
+ try{
+  const user = await getUser(req);
+  if(!user || !user.email) return res.status(401).json({error:'E-mail não autenticado. Acesse pelo link de validação.'});
+  if(!PADDLE_API_KEY || !PADDLE_PRICE_ID) return res.status(500).json({error:'Paddle ainda não está configurado no servidor.'});
+
+  const eventoId = req.body?.evento_id;
+  if(!eventoId) return res.status(400).json({error:'Evento não informado.'});
+
+  const email = String(user.email).toLowerCase();
+  const {data:ev,error} = await getSupabase().from('eventos').select('*').eq('id', eventoId).eq('email_usuario', email).single();
+  if(error) throw error;
+  if(!ev) return res.status(404).json({error:'Evento não encontrado para este e-mail.'});
+  if(ev.status_pagamento === 'pago') return res.json({ok:true,ja_pago:true,mensagem:'Evento já está pago.'});
+
+  const response = await fetch(PADDLE_API_BASE + '/transactions', {
+   method:'POST',
+   headers:{'Authorization':'Bearer '+PADDLE_API_KEY,'Content-Type':'application/json'},
+   body:JSON.stringify({
+    items:[{price_id:PADDLE_PRICE_ID, quantity:1}],
+    custom_data:{evento_id:ev.id,email_usuario:ev.email_usuario,origem:'audesc'}
+   })
+  });
+
+  const body = await response.json().catch(()=>({}));
+  if(!response.ok){
+   console.error('Erro ao criar transação Paddle:', body);
+   return res.status(response.status).json({error:'Erro ao criar pagamento no Paddle.', details:body});
+  }
+
+  const tx = body.data || body;
+  const checkoutUrl = tx.checkout?.url || tx.checkout_url || tx.url || null;
+
+  await getSupabase().from('eventos').update({
+   pagamento_provedor:'paddle',
+   pagamento_referencia:tx.id || null,
+   data_ultima_edicao:new Date().toISOString()
+  }).eq('id', ev.id);
+
+  res.json({ok:true,transaction:tx,checkout_url:checkoutUrl});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message || 'Erro ao criar transação Paddle.'});
+ }
+});
+
+app.post('/webhooks/paddle', async (req,res)=>{
+ try{
+  const evento = req.body || {};
+  const eventType = evento.event_type || evento.type || '';
+  const data = evento.data || {};
+  const custom = data.custom_data || {};
+  const eventoId = custom.evento_id;
+
+  if(!eventoId) return res.json({ok:true,ignored:true,reason:'Sem evento_id em custom_data.'});
+
+  const pago = ['transaction.completed','transaction.paid','transaction.payment_succeeded'].includes(eventType) || data.status === 'completed' || data.status === 'paid';
+
+  if(pago){
+   await getSupabase().from('eventos').update({
+    status_pagamento:'pago',
+    pagamento_provedor:'paddle',
+    pagamento_referencia:data.id || null,
+    pagamento_confirmado_em:new Date().toISOString(),
+    data_ultima_edicao:new Date().toISOString()
+   }).eq('id', eventoId);
+  }
+
+  res.json({ok:true,received:true,event_type:eventType,pago});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message || 'Erro no webhook Paddle.'});
+ }
+});
 
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));

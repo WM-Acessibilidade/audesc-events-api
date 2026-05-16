@@ -1,6 +1,6 @@
 {
   "name": "audesc-events-api",
-  "version": "14.0.0",
+  "version": "15.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -14,5 +14,5 @@
   "engines": {
     "node": ">=18"
   },
-  "description": "API Audesc com Meus Eventos seguro por token Supabase."
+  "description": "API Audesc com checkout Paddle e webhook de pagamento."
 }

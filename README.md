@@ -67,3 +67,19 @@ v14 Meus Eventos seguro:
 - GET /meus-eventos não aceita mais e-mail por query string.
 - Exige Authorization: Bearer <token Supabase>.
 - A API identifica o e-mail pelo token validado.
+
+
+v15 Paddle:
+- POST /pagamentos/paddle/criar-transacao cria pagamento Paddle para evento autenticado.
+- POST /webhooks/paddle marca status_pagamento = pago quando a transação for concluída.
+
+Variáveis no Render:
+PADDLE_API_KEY
+PADDLE_PRICE_ID
+PADDLE_ENV=sandbox
+
+SQL:
+alter table public.eventos
+add column if not exists pagamento_provedor text,
+add column if not exists pagamento_referencia text,
+add column if not exists pagamento_confirmado_em timestamp with time zone;
