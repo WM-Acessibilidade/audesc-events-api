@@ -449,6 +449,9 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
   const tx = body.data || body;
   const checkoutUrl = tx.checkout?.url || tx.checkout_url || tx.url || null;
 
+  console.log('PADDLE TRANSACTION COMPLETA:', JSON.stringify(tx, null, 2));
+  console.log('CHECKOUT URL DETECTADA:', checkoutUrl);
+
   await getSupabase().from('eventos').update({
    pagamento_provedor:'paddle',
    pagamento_referencia:tx.id || null,
