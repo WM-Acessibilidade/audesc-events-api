@@ -21,6 +21,7 @@ const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.de
 const AUDESC_SITE_URL = process.env.AUDESC_SITE_URL || 'https://wm-acessibilidade.github.io/audesc/';
 const PADDLE_API_KEY = process.env.PADDLE_API_KEY;
 const PADDLE_PRICE_ID = process.env.PADDLE_PRICE_ID;
+const PADDLE_CLIENT_TOKEN = process.env.PADDLE_CLIENT_TOKEN;
 const PADDLE_ENV = process.env.PADDLE_ENV || 'sandbox';
 const PADDLE_API_BASE = PADDLE_ENV === 'live' ? 'https://api.paddle.com' : 'https://sandbox-api.paddle.com';
 
@@ -49,7 +50,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v15-paddle'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v16-paddle-checkout'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -416,6 +417,23 @@ app.get('/meus-eventos', async (req,res)=>{
 
 
 
+
+app.get('/pagamentos/paddle/config', async (req,res)=>{
+ try{
+  if(!PADDLE_CLIENT_TOKEN){
+   return res.status(500).json({error:'PADDLE_CLIENT_TOKEN não configurado no servidor.'});
+  }
+  res.json({
+   ok:true,
+   environment:PADDLE_ENV,
+   client_token:PADDLE_CLIENT_TOKEN
+  });
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message || 'Erro ao carregar configuração Paddle.'});
+ }
+});
+
 app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
  try{
   const user = await getUser(req);
@@ -448,9 +466,6 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
 
   const tx = body.data || body;
   const checkoutUrl = tx.checkout?.url || tx.checkout_url || tx.url || null;
-
-  console.log('PADDLE TRANSACTION COMPLETA:', JSON.stringify(tx, null, 2));
-  console.log('CHECKOUT URL DETECTADA:', checkoutUrl);
 
   await getSupabase().from('eventos').update({
    pagamento_provedor:'paddle',

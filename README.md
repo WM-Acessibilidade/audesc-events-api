@@ -83,3 +83,9 @@ alter table public.eventos
 add column if not exists pagamento_provedor text,
 add column if not exists pagamento_referencia text,
 add column if not exists pagamento_confirmado_em timestamp with time zone;
+
+
+v16 Paddle checkout:
+- Adiciona GET /pagamentos/paddle/config.
+- Retorna PADDLE_CLIENT_TOKEN e PADDLE_ENV para inicializar Paddle.js no frontend.
+- Mantém API Key secreta apenas no backend.
