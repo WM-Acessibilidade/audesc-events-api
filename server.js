@@ -50,7 +50,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v16-paddle-checkout'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v17-webhook-logs'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -482,24 +482,44 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
 
 app.post('/webhooks/paddle', async (req,res)=>{
  try{
+  console.log('WEBHOOK PADDLE RECEBIDO:', new Date().toISOString());
+  console.log('WEBHOOK PADDLE BODY:', JSON.stringify(req.body || {}, null, 2));
   const evento = req.body || {};
   const eventType = evento.event_type || evento.type || '';
   const data = evento.data || {};
   const custom = data.custom_data || {};
   const eventoId = custom.evento_id;
 
-  if(!eventoId) return res.json({ok:true,ignored:true,reason:'Sem evento_id em custom_data.'});
+  console.log('WEBHOOK PADDLE EVENT_TYPE:', eventType);
+  console.log('WEBHOOK PADDLE EVENTO_ID:', eventoId);
+  console.log('WEBHOOK PADDLE STATUS:', data.status);
+
+  if(!eventoId){
+   console.log('WEBHOOK PADDLE IGNORADO: sem evento_id em custom_data.');
+   return res.json({ok:true,ignored:true,reason:'Sem evento_id em custom_data.'});
+  }
 
   const pago = ['transaction.completed','transaction.paid','transaction.payment_succeeded'].includes(eventType) || data.status === 'completed' || data.status === 'paid';
 
   if(pago){
-   await getSupabase().from('eventos').update({
+   console.log('WEBHOOK PADDLE: pagamento reconhecido como PAGO. Atualizando evento:', eventoId);
+
+   const { error: updateError } = await getSupabase().from('eventos').update({
     status_pagamento:'pago',
     pagamento_provedor:'paddle',
     pagamento_referencia:data.id || null,
     pagamento_confirmado_em:new Date().toISOString(),
     data_ultima_edicao:new Date().toISOString()
    }).eq('id', eventoId);
+
+   if(updateError){
+    console.error('WEBHOOK PADDLE: erro ao atualizar evento:', updateError);
+    throw updateError;
+   }
+
+   console.log('WEBHOOK PADDLE: evento atualizado com sucesso:', eventoId);
+  } else {
+   console.log('WEBHOOK PADDLE: recebido, mas não considerado pagamento concluído.');
   }
 
   res.json({ok:true,received:true,event_type:eventType,pago});

@@ -89,3 +89,10 @@ v16 Paddle checkout:
 - Adiciona GET /pagamentos/paddle/config.
 - Retorna PADDLE_CLIENT_TOKEN e PADDLE_ENV para inicializar Paddle.js no frontend.
 - Mantém API Key secreta apenas no backend.
+
+
+v17 Webhook logs:
+- Adiciona logs explícitos ao endpoint POST /webhooks/paddle.
+- Registra corpo recebido, event_type, evento_id e status.
+- Registra se o pagamento foi reconhecido como concluído.
+- Registra sucesso ou erro ao atualizar status_pagamento no Supabase.
