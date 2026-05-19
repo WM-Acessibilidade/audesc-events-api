@@ -50,7 +50,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v19-pos-pagamento'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v20-idempotente'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -494,8 +494,8 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   }
 
   if(ev.status_operacao === 'liberado' && ev.sala_codigo && ev.senha_transmissor){
-    console.log('PÓS-PAGAMENTO: evento já estava liberado.', eventoId);
-    return { ok:true, already_liberated:true, evento:ev };
+    console.log('PÓS-PAGAMENTO: evento já estava liberado. Não vou recriar sala, senha nem reenviar e-mail automático.', eventoId);
+    return { ok:true, already_liberated:true, email_skipped:true, evento:ev, sala_codigo:ev.sala_codigo, senha_transmissor:ev.senha_transmissor };
   }
 
   const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
@@ -515,8 +515,13 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   let email_resultado = { ok:false, skipped:true, reason:'E-mail não enviado.' };
 
   try{
-    email_resultado = await enviarEmailLiberacao(up, senha, sala);
-    await registrarResultadoEmail(up.id, email_resultado);
+    if(up.email_liberacao_status === 'enviado'){
+      email_resultado = { ok:false, skipped:true, reason:'E-mail de liberação já havia sido enviado.' };
+      console.log('PÓS-PAGAMENTO: e-mail já havia sido enviado. Não reenviando automaticamente.', eventoId);
+    }else{
+      email_resultado = await enviarEmailLiberacao(up, senha, sala);
+      await registrarResultadoEmail(up.id, email_resultado);
+    }
   }catch(e){
     console.error('PÓS-PAGAMENTO: falha ao enviar e-mail automático:', e);
     email_resultado = { ok:false, error:String(e && e.message ? e.message : e) };
