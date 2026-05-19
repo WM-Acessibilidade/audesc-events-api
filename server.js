@@ -50,7 +50,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v18-pagamento-page'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v19-pos-pagamento'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -480,6 +480,54 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
  }
 });
 
+
+async function liberarAutomaticamenteAposPagamento(eventoId){
+  const sb = getSupabase();
+
+  const { data: ev, error } = await sb.from('eventos').select('*').eq('id', eventoId).single();
+  if(error) throw error;
+  if(!ev) throw new Error('Evento não encontrado para liberação automática.');
+
+  if(ev.tipo_servico !== 'audesc_transmissao'){
+    console.log('PÓS-PAGAMENTO: evento não é de transmissão Audesc. Não será gerada sala.', eventoId);
+    return { ok:false, skipped:true, reason:'Evento não é de transmissão Audesc.' };
+  }
+
+  if(ev.status_operacao === 'liberado' && ev.sala_codigo && ev.senha_transmissor){
+    console.log('PÓS-PAGAMENTO: evento já estava liberado.', eventoId);
+    return { ok:true, already_liberated:true, evento:ev };
+  }
+
+  const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
+  const sala = ev.sala_codigo || await gerarSalaUnica(sb);
+
+  const { data: up, error: er } = await sb.from('eventos').update({
+    status_publicacao: ev.status_publicacao || 'aprovado',
+    status_pagamento: 'pago',
+    status_operacao: 'liberado',
+    senha_transmissor: senha,
+    sala_codigo: sala,
+    data_ultima_edicao: new Date().toISOString()
+  }).eq('id', eventoId).select().single();
+
+  if(er) throw er;
+
+  let email_resultado = { ok:false, skipped:true, reason:'E-mail não enviado.' };
+
+  try{
+    email_resultado = await enviarEmailLiberacao(up, senha, sala);
+    await registrarResultadoEmail(up.id, email_resultado);
+  }catch(e){
+    console.error('PÓS-PAGAMENTO: falha ao enviar e-mail automático:', e);
+    email_resultado = { ok:false, error:String(e && e.message ? e.message : e) };
+    await registrarResultadoEmail(up.id, email_resultado);
+  }
+
+  console.log('PÓS-PAGAMENTO: evento liberado automaticamente:', eventoId, sala);
+  return { ok:true, evento:up, senha_transmissor:senha, sala_codigo:sala, email_resultado };
+}
+
+
 app.post('/webhooks/paddle', async (req,res)=>{
  try{
   console.log('WEBHOOK PADDLE RECEBIDO:', new Date().toISOString());
@@ -501,6 +549,8 @@ app.post('/webhooks/paddle', async (req,res)=>{
 
   const pago = ['transaction.completed','transaction.paid','transaction.payment_succeeded'].includes(eventType) || data.status === 'completed' || data.status === 'paid';
 
+  let liberacao_automatica = null;
+
   if(pago){
    console.log('WEBHOOK PADDLE: pagamento reconhecido como PAGO. Atualizando evento:', eventoId);
 
@@ -518,11 +568,16 @@ app.post('/webhooks/paddle', async (req,res)=>{
    }
 
    console.log('WEBHOOK PADDLE: evento atualizado com sucesso:', eventoId);
+
+   liberacao_automatica = await liberarAutomaticamenteAposPagamento(eventoId).catch(e => {
+    console.error('WEBHOOK PADDLE: erro na liberação automática pós-pagamento:', e);
+    return { ok:false, error:String(e && e.message ? e.message : e) };
+   });
   } else {
    console.log('WEBHOOK PADDLE: recebido, mas não considerado pagamento concluído.');
   }
 
-  res.json({ok:true,received:true,event_type:eventType,pago});
+  res.json({ok:true,received:true,event_type:eventType,pago,liberacao_automatica});
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message || 'Erro no webhook Paddle.'});

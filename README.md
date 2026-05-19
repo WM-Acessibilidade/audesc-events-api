@@ -96,3 +96,10 @@ v17 Webhook logs:
 - Registra corpo recebido, event_type, evento_id e status.
 - Registra se o pagamento foi reconhecido como concluído.
 - Registra sucesso ou erro ao atualizar status_pagamento no Supabase.
+
+
+v19 pós-pagamento:
+- Webhook Paddle confirma pagamento e libera automaticamente eventos de transmissão Audesc.
+- Gera sala e senha.
+- Marca status_operacao = liberado.
+- Envia e-mail automático com sala e senha ao responsável.
