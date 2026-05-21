@@ -50,7 +50,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v21-oficial-sheet'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v23-evento-individual'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -66,7 +66,7 @@ app.post('/criar-evento', async (req,res)=>{
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
   const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:tipo_evento==='publico'?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
       uf: text(b.pais)==='Outros' ? '' : text(b.uf),
-      data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
+      data_evento:b.data_evento||null,duracao_horas,max_ouvintes,divulgar_acesso_ouvintes:(tipo_servico==='audesc_transmissao')&&(b.divulgar_acesso_ouvintes===true||text(b.divulgar_acesso_ouvintes)==='true')};
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
   res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data});
@@ -286,6 +286,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'max_ouvintes',
       'tipo_servico',
       'tipo_evento',
+      'divulgar_acesso_ouvintes',
       'pais',
       'uf'
     ];
@@ -316,7 +317,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,divulgar_acesso_ouvintes,pais,uf,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
