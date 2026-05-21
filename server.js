@@ -616,6 +616,66 @@ app.post('/webhooks/paddle', async (req,res)=>{
 });
 
 
+app.delete('/meus-eventos/:id', async (req,res)=>{
+ try{
+  const user = await getUser(req);
+
+  if(!user || !user.email){
+   return res.status(401).json({
+    error:'E-mail não autenticado. Acesse pelo link de validação.'
+   });
+  }
+
+  const email = String(user.email || '')
+   .trim()
+   .toLowerCase();
+
+  const sb = getSupabase();
+
+  const {data:ev,error:findError} = await sb
+   .from('eventos')
+   .select('*')
+   .eq('id', req.params.id)
+   .eq('email_usuario', email)
+   .single();
+
+  if(findError) throw findError;
+
+  if(!ev){
+   return res.status(404).json({
+    error:'Evento não encontrado para este e-mail.'
+   });
+  }
+
+  if(ev.status_operacao === 'liberado'){
+   return res.status(403).json({
+    error:'Eventos liberados não podem ser excluídos definitivamente.'
+   });
+  }
+
+  const {error:deleteError} = await sb
+   .from('eventos')
+   .delete()
+   .eq('id', req.params.id)
+   .eq('email_usuario', email);
+
+  if(deleteError) throw deleteError;
+
+  res.json({
+   ok:true,
+   mensagem:'Evento pendente excluído definitivamente.'
+  });
+
+ }catch(e){
+  console.error(e);
+
+  res.status(500).json({
+   error:e.message || 'Erro ao excluir evento.'
+  });
+ }
+});
+
+
 app.get('/meus-eventos/:id', async (req,res)=>{
  try{
   const user = await getUser(req);
