@@ -24,6 +24,12 @@ const PADDLE_PRICE_ID = process.env.PADDLE_PRICE_ID;
 const PADDLE_CLIENT_TOKEN = process.env.PADDLE_CLIENT_TOKEN;
 const PADDLE_ENV = process.env.PADDLE_ENV || 'sandbox';
 const PADDLE_API_BASE = PADDLE_ENV === 'live' ? 'https://api.paddle.com' : 'https://sandbox-api.paddle.com';
+const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
+const MERCADOPAGO_PUBLIC_KEY = process.env.MERCADOPAGO_PUBLIC_KEY;
+const MERCADOPAGO_API_BASE = 'https://api.mercadopago.com';
+const MERCADOPAGO_VALOR_EVENTO = Number(process.env.MERCADOPAGO_VALOR_EVENTO || 10);
+const MERCADOPAGO_NOTIFICATION_URL = process.env.MERCADOPAGO_NOTIFICATION_URL || 'https://audesc-events-api.onrender.com/webhooks/mercadopago';
+const AUDESC_WEB_URL = process.env.AUDESC_WEB_URL || 'https://wm-acessibilidade.github.io/audesc-web';
 
 function text(v){ return String(v || '').trim(); }
 function limit(v,n){ return text(v).slice(0,n); }
@@ -50,7 +56,7 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v23-evento-individual'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v23-mercadopago'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -66,7 +72,7 @@ app.post('/criar-evento', async (req,res)=>{
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
   const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:tipo_evento==='publico'?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
       uf: text(b.pais)==='Outros' ? '' : text(b.uf),
-      data_evento:b.data_evento||null,duracao_horas,max_ouvintes,divulgar_acesso_ouvintes:(tipo_servico==='audesc_transmissao')&&(b.divulgar_acesso_ouvintes===true||text(b.divulgar_acesso_ouvintes)==='true')};
+      data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
   res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data});
@@ -286,7 +292,6 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'max_ouvintes',
       'tipo_servico',
       'tipo_evento',
-      'divulgar_acesso_ouvintes',
       'pais',
       'uf'
     ];
@@ -317,7 +322,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,divulgar_acesso_ouvintes,pais,uf,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -418,6 +423,79 @@ app.get('/meus-eventos', async (req,res)=>{
 
 
 
+
+
+
+app.get('/pagamentos/mercadopago/config', async (req,res)=>{
+ try{
+  if(!MERCADOPAGO_PUBLIC_KEY){
+   return res.status(500).json({error:'MERCADOPAGO_PUBLIC_KEY não configurada no servidor.'});
+  }
+  res.json({ok:true, public_key:MERCADOPAGO_PUBLIC_KEY});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message || 'Erro ao carregar configuração Mercado Pago.'});
+ }
+});
+
+app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
+ try{
+  const user = await getUser(req);
+  if(!user || !user.email) return res.status(401).json({error:'E-mail não autenticado. Acesse pelo link de validação.'});
+  if(!MERCADOPAGO_ACCESS_TOKEN) return res.status(500).json({error:'Mercado Pago ainda não está configurado no servidor.'});
+
+  const eventoId = req.body?.evento_id;
+  if(!eventoId) return res.status(400).json({error:'Evento não informado.'});
+
+  const email = String(user.email).toLowerCase();
+  const {data:ev,error} = await getSupabase().from('eventos').select('*').eq('id', eventoId).eq('email_usuario', email).single();
+  if(error) throw error;
+  if(!ev) return res.status(404).json({error:'Evento não encontrado para este e-mail.'});
+  if(ev.status_pagamento === 'pago') return res.json({ok:true,ja_pago:true,mensagem:'Evento já está pago.'});
+
+  const titulo = ev.titulo_publicado || ev.titulo_original || 'Evento Audesc';
+  const pagamentoUrl = `${AUDESC_WEB_URL.replace(/\/$/,'')}/pagamento.html?evento=${encodeURIComponent(ev.id)}`;
+
+  const preferenceBody = {
+   items:[{
+    title: titulo,
+    description: 'Publicação e transmissão de audiodescrição ao vivo pelo Audesc',
+    quantity: 1,
+    currency_id: 'BRL',
+    unit_price: MERCADOPAGO_VALOR_EVENTO
+   }],
+   payer:{ email: ev.email_usuario },
+   external_reference: ev.id,
+   metadata:{ evento_id: ev.id, email_usuario: ev.email_usuario, origem:'audesc' },
+   notification_url: MERCADOPAGO_NOTIFICATION_URL,
+   back_urls:{ success:pagamentoUrl, pending:pagamentoUrl, failure:pagamentoUrl },
+   auto_return:'approved'
+  };
+
+  const response = await fetch(MERCADOPAGO_API_BASE + '/checkout/preferences', {
+   method:'POST',
+   headers:{'Authorization':'Bearer '+MERCADOPAGO_ACCESS_TOKEN,'Content-Type':'application/json'},
+   body:JSON.stringify(preferenceBody)
+  });
+
+  const body = await response.json().catch(()=>({}));
+  if(!response.ok){
+   console.error('Erro ao criar preferência Mercado Pago:', body);
+   return res.status(response.status).json({error:'Erro ao criar pagamento no Mercado Pago.', details:body});
+  }
+
+  await getSupabase().from('eventos').update({
+   pagamento_provedor:'mercadopago',
+   pagamento_referencia:body.id || null,
+   data_ultima_edicao:new Date().toISOString()
+  }).eq('id', ev.id);
+
+  res.json({ok:true, preference:body, checkout_url:body.init_point || body.sandbox_init_point || null, sandbox_checkout_url:body.sandbox_init_point || null});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message || 'Erro ao criar pagamento Mercado Pago.'});
+ }
+});
 
 app.get('/pagamentos/paddle/config', async (req,res)=>{
  try{
@@ -554,6 +632,124 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   return { ok:true, evento:up, senha_transmissor:up.senha_transmissor, sala_codigo:up.sala_codigo, email_resultado };
 }
 
+
+
+
+async function confirmarPagamentoMercadoPago(eventoId, paymentId){
+  if(!eventoId) return {ok:false, skipped:true, reason:'Sem evento_id.'};
+
+  console.log('MERCADO PAGO: pagamento aprovado. Tentando confirmar apenas uma vez:', eventoId);
+
+  const { data: pagamentoConfirmado, error: updateError } = await getSupabase().from('eventos').update({
+   status_pagamento:'pago',
+   pagamento_provedor:'mercadopago',
+   pagamento_referencia:String(paymentId || ''),
+   pagamento_confirmado_em:new Date().toISOString(),
+   data_ultima_edicao:new Date().toISOString()
+  }).eq('id', eventoId).is('pagamento_confirmado_em', null).select().maybeSingle();
+
+  if(updateError){
+   console.error('MERCADO PAGO: erro ao confirmar pagamento:', updateError);
+   throw updateError;
+  }
+
+  if(!pagamentoConfirmado){
+   console.log('MERCADO PAGO: pagamento já havia sido confirmado antes. Ignorando webhook repetido:', eventoId);
+   return {ok:true, skipped:true, reason:'Pagamento já confirmado anteriormente.'};
+  }
+
+  const liberacao = await liberarAutomaticamenteAposPagamento(eventoId).catch(e => {
+   console.error('MERCADO PAGO: erro na liberação automática pós-pagamento:', e);
+   return {ok:false, error:String(e && e.message ? e.message : e)};
+  });
+
+  return {ok:true, evento_id:eventoId, liberacao_automatica:liberacao};
+}
+
+async function buscarPagamentoMercadoPago(paymentId){
+  const response = await fetch(MERCADOPAGO_API_BASE + '/v1/payments/' + encodeURIComponent(paymentId), {
+   headers:{'Authorization':'Bearer '+MERCADOPAGO_ACCESS_TOKEN}
+  });
+  const body = await response.json().catch(()=>({}));
+  if(!response.ok){
+   console.error('MERCADO PAGO: erro ao consultar pagamento:', body);
+   throw new Error('Erro ao consultar pagamento Mercado Pago.');
+  }
+  return body;
+}
+
+async function buscarMerchantOrderMercadoPago(orderId){
+  const response = await fetch(MERCADOPAGO_API_BASE + '/merchant_orders/' + encodeURIComponent(orderId), {
+   headers:{'Authorization':'Bearer '+MERCADOPAGO_ACCESS_TOKEN}
+  });
+  const body = await response.json().catch(()=>({}));
+  if(!response.ok){
+   console.error('MERCADO PAGO: erro ao consultar order:', body);
+   throw new Error('Erro ao consultar ordem Mercado Pago.');
+  }
+  return body;
+}
+
+app.post('/webhooks/mercadopago', async (req,res)=>{
+ try{
+  console.log('WEBHOOK MERCADO PAGO RECEBIDO:', new Date().toISOString());
+  console.log('WEBHOOK MERCADO PAGO QUERY:', JSON.stringify(req.query || {}, null, 2));
+  console.log('WEBHOOK MERCADO PAGO BODY:', JSON.stringify(req.body || {}, null, 2));
+
+  if(!MERCADOPAGO_ACCESS_TOKEN){
+   console.warn('MERCADO PAGO: MERCADOPAGO_ACCESS_TOKEN ausente.');
+   return res.status(500).json({error:'Mercado Pago não configurado no servidor.'});
+  }
+
+  const body = req.body || {};
+  const query = req.query || {};
+  const tipo = body.type || body.topic || query.type || query.topic || '';
+  const id = body?.data?.id || body.id || query['data.id'] || query.id || query.resource || null;
+
+  if(!id){
+   console.log('MERCADO PAGO: webhook sem id. Respondendo OK para simulação.');
+   return res.json({ok:true,received:true,ignored:true,reason:'Webhook sem id.'});
+  }
+
+  if(tipo === 'payment' || body.action?.includes('payment')){
+   const pagamento = await buscarPagamentoMercadoPago(id);
+   const status = pagamento.status;
+   const eventoId = pagamento.external_reference || pagamento.metadata?.evento_id;
+   console.log('MERCADO PAGO PAYMENT STATUS:', status);
+   console.log('MERCADO PAGO EVENTO_ID:', eventoId);
+
+   if(status === 'approved'){
+    const resultado = await confirmarPagamentoMercadoPago(eventoId, pagamento.id);
+    return res.json({ok:true,received:true,tipo:'payment',status,resultado});
+   }
+   return res.json({ok:true,received:true,tipo:'payment',status,approved:false});
+  }
+
+  if(tipo === 'merchant_order' || tipo === 'order'){
+   const order = await buscarMerchantOrderMercadoPago(id);
+   const eventoId = order.external_reference || order.metadata?.evento_id;
+   const pagamentos = Array.isArray(order.payments) ? order.payments : [];
+   const aprovado = pagamentos.find(p => p.status === 'approved');
+   console.log('MERCADO PAGO ORDER EVENTO_ID:', eventoId);
+   console.log('MERCADO PAGO ORDER APROVADO:', !!aprovado);
+
+   if(aprovado){
+    const resultado = await confirmarPagamentoMercadoPago(eventoId, aprovado.id);
+    return res.json({ok:true,received:true,tipo:'merchant_order',resultado});
+   }
+   return res.json({ok:true,received:true,tipo:'merchant_order',approved:false});
+  }
+
+  res.json({ok:true,received:true,ignored:true,tipo});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message || 'Erro no webhook Mercado Pago.'});
+ }
+});
+
+app.get('/webhooks/mercadopago', async (req,res)=>{
+ res.json({ok:true,service:'audesc-events-api',webhook:'mercadopago'});
+});
 
 app.post('/webhooks/paddle', async (req,res)=>{
  try{
