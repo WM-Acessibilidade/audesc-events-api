@@ -56,9 +56,133 @@ function makeRoom(){
 async function getSheets(){ if(!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) throw new Error('Google Sheets não configurado.'); const auth=new google.auth.JWT({email:GOOGLE_CLIENT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']}); return google.sheets({version:'v4',auth}); }
 function endDate(start,hours){ const d=start?new Date(start):new Date(); return new Date(d.getTime()+Number(hours||2)*3600000).toISOString(); }
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
+
+
+function moedaDoEvento(ev){
+  return String(ev?.pais || '').trim().toLowerCase() === 'brasil' ? 'BRL' : 'USD';
+}
+
+function arredondarValor(v){
+  return Math.max(0, Math.round(Number(v || 0) * 100) / 100);
+}
+
+async function obterPrecificacao(moeda){
+  const { data, error } = await getSupabase()
+    .from('precificacao')
+    .select('*')
+    .eq('moeda', moeda)
+    .single();
+
+  if(error) throw error;
+  if(!data) throw new Error('Precificação não encontrada para a moeda '+moeda+'.');
+  return data;
+}
+
+function calcularValorPacote(ev, precificacao){
+  const ouvintesMinimos = Number(precificacao.ouvintes_minimos || 10);
+  const duracaoMinima = Number(precificacao.duracao_minima_horas || 1);
+  const base = Number(precificacao.valor_base_10_ouvintes_1_hora || 0);
+  const acrescimo = Number(precificacao.acrescimo_por_10_ouvintes || 0);
+
+  const ouvintes = Math.max(ouvintesMinimos, Number(ev.max_ouvintes || ouvintesMinimos));
+  const duracao = Math.max(duracaoMinima, Number(ev.duracao_horas || duracaoMinima));
+
+  const blocosAdicionais = Math.max(0, Math.ceil((ouvintes - ouvintesMinimos) / 10));
+  const valorPorHora = base + (blocosAdicionais * acrescimo);
+  const total = arredondarValor(valorPorHora * duracao);
+
+  return {
+    moeda: precificacao.moeda,
+    ouvintes,
+    duracao_horas: duracao,
+    valor_por_hora: arredondarValor(valorPorHora),
+    valor_original: total,
+    blocos_adicionais: blocosAdicionais
+  };
+}
+
+async function calcularPagamentoEvento(ev, codigoCupom){
+  const moeda = moedaDoEvento(ev);
+  const precificacao = await obterPrecificacao(moeda);
+  const pacote = calcularValorPacote(ev, precificacao);
+
+  let cupom = null;
+  let desconto = 0;
+  const codigo = text(codigoCupom).toUpperCase();
+
+  if(codigo){
+    const { data: cupomData, error: cupomError } = await getSupabase()
+      .from('cupons')
+      .select('*')
+      .eq('codigo', codigo)
+      .maybeSingle();
+
+    if(cupomError) throw cupomError;
+    if(!cupomData) throw new Error('Cupom não encontrado.');
+    if(!cupomData.ativo) throw new Error('Cupom inativo.');
+    if(cupomData.validade && new Date(cupomData.validade).getTime() < Date.now()) throw new Error('Cupom expirado.');
+    if(cupomData.limite_uso != null && Number(cupomData.usos_realizados || 0) >= Number(cupomData.limite_uso)) throw new Error('Cupom esgotado.');
+    if(cupomData.moeda && cupomData.moeda !== moeda) throw new Error('Este cupom não é válido para a moeda deste pagamento.');
+
+    if(cupomData.tipo_desconto === 'percentual'){
+      desconto = pacote.valor_original * (Number(cupomData.valor_desconto || 0) / 100);
+    }else{
+      desconto = Number(cupomData.valor_desconto || 0);
+    }
+
+    desconto = Math.min(pacote.valor_original, arredondarValor(desconto));
+    cupom = cupomData;
+  }
+
+  const valorFinal = arredondarValor(pacote.valor_original - desconto);
+
+  return {
+    moeda,
+    pacote,
+    cupom,
+    cupom_codigo: cupom ? cupom.codigo : null,
+    desconto_aplicado: desconto,
+    valor_original: pacote.valor_original,
+    valor_final: valorFinal
+  };
+}
+
+function valorMenorUnidade(valor){
+  return String(Math.round(Number(valor || 0) * 100));
+}
+
+async function registrarDadosPagamentoEvento(eventoId, dados, provedor, referencia){
+  await getSupabase().from('eventos').update({
+    moeda_pagamento: dados.moeda,
+    valor_original: dados.valor_original,
+    cupom_codigo: dados.cupom_codigo,
+    desconto_aplicado: dados.desconto_aplicado,
+    valor_final: dados.valor_final,
+    pagamento_provedor: provedor,
+    pagamento_referencia: referencia || null,
+    data_ultima_edicao: new Date().toISOString()
+  }).eq('id', eventoId);
+}
+
+async function incrementarUsoCupomSeAplicavel(codigo){
+  const c = text(codigo).toUpperCase();
+  if(!c) return;
+  try{
+    const { data: cupom, error } = await getSupabase().from('cupons').select('*').eq('codigo', c).maybeSingle();
+    if(error || !cupom) return;
+    await getSupabase().from('cupons').update({
+      usos_realizados: Number(cupom.usos_realizados || 0) + 1,
+      atualizado_em: new Date().toISOString()
+    }).eq('id', cupom.id);
+  }catch(e){
+    console.warn('Não foi possível incrementar uso do cupom:', e.message || e);
+  }
+}
+
+
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v23-mercadopago-brasil'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v24-precificacao-cupons'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -259,6 +383,130 @@ async function liberar(req,res){
 app.post('/liberar-evento/:id',liberar);
 app.get('/liberar-evento/:id',liberar);
 
+
+
+app.get('/admin/precificacao', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const {data,error}=await getSupabase().from('precificacao').select('*').order('moeda',{ascending:true});
+  if(error) throw error;
+  res.json({ok:true,precificacao:data||[]});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao carregar precificação.'});
+ }
+});
+
+app.patch('/admin/precificacao/:moeda', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const moeda = String(req.params.moeda || '').toUpperCase();
+  if(!['BRL','USD','EUR'].includes(moeda)) return res.status(400).json({error:'Moeda inválida.'});
+
+  const b=req.body||{};
+  const update={
+   valor_base_10_ouvintes_1_hora:Number(b.valor_base_10_ouvintes_1_hora),
+   acrescimo_por_10_ouvintes:Number(b.acrescimo_por_10_ouvintes),
+   ouvintes_minimos:Number(b.ouvintes_minimos||10),
+   duracao_minima_horas:Number(b.duracao_minima_horas||1),
+   atualizado_em:new Date().toISOString()
+  };
+
+  const {data,error}=await getSupabase().from('precificacao').update(update).eq('moeda',moeda).select().single();
+  if(error) throw error;
+  res.json({ok:true,precificacao:data});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao atualizar precificação.'});
+ }
+});
+
+app.get('/admin/cupons', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const {data,error}=await getSupabase().from('cupons').select('*').order('criado_em',{ascending:false});
+  if(error) throw error;
+  res.json({ok:true,cupons:data||[]});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao carregar cupons.'});
+ }
+});
+
+app.post('/admin/cupons', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const b=req.body||{};
+  const codigo=text(b.codigo).toUpperCase();
+  if(!codigo) return res.status(400).json({error:'Informe o código do cupom.'});
+  const tipo=text(b.tipo_desconto);
+  if(!['percentual','valor_fixo'].includes(tipo)) return res.status(400).json({error:'Tipo de desconto inválido.'});
+
+  const payload={
+   codigo,
+   tipo_desconto:tipo,
+   valor_desconto:Number(b.valor_desconto||0),
+   moeda:text(b.moeda)||null,
+   ativo:b.ativo !== false,
+   validade:b.validade || null,
+   limite_uso:b.limite_uso === '' || b.limite_uso == null ? null : Number(b.limite_uso),
+   atualizado_em:new Date().toISOString()
+  };
+
+  const {data,error}=await getSupabase().from('cupons').insert(payload).select().single();
+  if(error) throw error;
+  res.json({ok:true,cupom:data});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao criar cupom.'});
+ }
+});
+
+app.patch('/admin/cupons/:id', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const b=req.body||{};
+  const update={atualizado_em:new Date().toISOString()};
+
+  ['codigo','tipo_desconto','moeda'].forEach(k=>{
+   if(Object.prototype.hasOwnProperty.call(b,k)) update[k]=k==='codigo'?text(b[k]).toUpperCase():(text(b[k])||null);
+  });
+  ['valor_desconto','limite_uso'].forEach(k=>{
+   if(Object.prototype.hasOwnProperty.call(b,k)) update[k]=(b[k]===''||b[k]==null)?null:Number(b[k]);
+  });
+  ['ativo'].forEach(k=>{
+   if(Object.prototype.hasOwnProperty.call(b,k)) update[k]=!!b[k];
+  });
+  if(Object.prototype.hasOwnProperty.call(b,'validade')) update.validade=b.validade||null;
+
+  const {data,error}=await getSupabase().from('cupons').update(update).eq('id',req.params.id).select().single();
+  if(error) throw error;
+  res.json({ok:true,cupom:data});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao atualizar cupom.'});
+ }
+});
+
+app.get('/pagamentos/calcular/:id', async (req,res)=>{
+ try{
+  const user=await getUser(req);
+  if(!user || !user.email) return res.status(401).json({error:'E-mail não autenticado. Acesse pelo link de validação.'});
+
+  const email=String(user.email).toLowerCase();
+  const {data:ev,error}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).eq('email_usuario',email).single();
+  if(error) throw error;
+  if(!ev) return res.status(404).json({error:'Evento não encontrado.'});
+
+  const dados=await calcularPagamentoEvento(ev, req.query.cupom || '');
+  res.json({ok:true,calculo:dados});
+ }catch(e){
+  console.error(e);
+  res.status(400).json({error:e.message||'Erro ao calcular pagamento.'});
+ }
+});
+
+
 app.get('/admin/eventos', async (req, res) => {
   try {
     if (!admin(req, res)) return;
@@ -295,7 +543,12 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'tipo_servico',
       'tipo_evento',
       'pais',
-      'uf'
+      'uf',
+      'moeda_pagamento',
+      'valor_original',
+      'cupom_codigo',
+      'desconto_aplicado',
+      'valor_final'
     ];
     const update = {};
     for (const key of allowed) {
@@ -452,6 +705,7 @@ app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
   if(!MERCADOPAGO_ACCESS_TOKEN) return res.status(500).json({error:'Mercado Pago ainda não está configurado no servidor.'});
 
   const eventoId = req.body?.evento_id;
+  const codigoCupom = req.body?.cupom || req.body?.cupom_codigo || '';
   if(!eventoId) return res.status(400).json({error:'Evento não informado.'});
 
   const email = String(user.email).toLowerCase();
@@ -471,6 +725,25 @@ app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
    return res.status(400).json({error:'Mercado Pago está disponível apenas para eventos do Brasil. Para outros países, use o pagamento internacional.'});
   }
 
+  const dadosPagamento = await calcularPagamentoEvento(ev, codigoCupom);
+  if(dadosPagamento.valor_final <= 0){
+   await registrarDadosPagamentoEvento(ev.id, dadosPagamento, 'mercadopago', 'cupom_integral');
+   const { data: pagamentoConfirmado, error: updateError } = await getSupabase().from('eventos').update({
+    status_pagamento:'pago',
+    pagamento_provedor:'mercadopago',
+    pagamento_referencia:'cupom_integral',
+    pagamento_confirmado_em:new Date().toISOString(),
+    data_ultima_edicao:new Date().toISOString()
+   }).eq('id', ev.id).is('pagamento_confirmado_em', null).select().maybeSingle();
+   if(updateError) throw updateError;
+   if(pagamentoConfirmado){
+    await incrementarUsoCupomSeAplicavel(dadosPagamento.cupom_codigo);
+    await incrementarUsoCupomSeAplicavel(dadosPagamento.cupom_codigo);
+    await liberarAutomaticamenteAposPagamento(ev.id);
+   }
+   return res.json({ok:true,ja_pago:true,cortesia:true,calculo:dadosPagamento,mensagem:'Cupom integral aplicado.'});
+  }
+
   const titulo = ev.titulo_publicado || ev.titulo_original || 'Evento Audesc';
   const pagamentoUrl = `${AUDESC_WEB_URL.replace(/\/$/,'')}/pagamento.html?evento=${encodeURIComponent(ev.id)}`;
 
@@ -481,7 +754,7 @@ app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
      description: 'Publicação e transmissão de audiodescrição ao vivo pelo Audesc',
      quantity: 1,
      currency_id: 'BRL',
-     unit_price: MERCADOPAGO_VALOR_EVENTO
+     unit_price: dadosPagamento.valor_final
     }
    ],
    payer:{
@@ -518,11 +791,7 @@ app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
    return res.status(response.status).json({error:'Erro ao criar pagamento no Mercado Pago.', details:body});
   }
 
-  await getSupabase().from('eventos').update({
-   pagamento_provedor:'mercadopago',
-   pagamento_referencia:body.id || null,
-   data_ultima_edicao:new Date().toISOString()
-  }).eq('id', ev.id);
+  await registrarDadosPagamentoEvento(ev.id, dadosPagamento, 'mercadopago', body.id || null);
 
   const checkoutUrl = MERCADOPAGO_ENV === 'live'
    ? (body.init_point || body.sandbox_init_point || null)
@@ -566,6 +835,7 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
   if(!PADDLE_API_KEY || !PADDLE_PRICE_ID) return res.status(500).json({error:'Paddle ainda não está configurado no servidor.'});
 
   const eventoId = req.body?.evento_id;
+  const codigoCupom = req.body?.cupom || req.body?.cupom_codigo || '';
   if(!eventoId) return res.status(400).json({error:'Evento não informado.'});
 
   const email = String(user.email).toLowerCase();
@@ -574,12 +844,58 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
   if(!ev) return res.status(404).json({error:'Evento não encontrado para este e-mail.'});
   if(ev.status_pagamento === 'pago') return res.json({ok:true,ja_pago:true,mensagem:'Evento já está pago.'});
 
+  const dadosPagamento = await calcularPagamentoEvento(ev, codigoCupom);
+  if(String(ev.pais || '').trim().toLowerCase() === 'brasil'){
+   return res.status(400).json({error:'Paddle é usado apenas para pagamentos internacionais. Para Brasil, use Mercado Pago.'});
+  }
+  if(!['USD','EUR'].includes(dadosPagamento.moeda)) dadosPagamento.moeda = 'USD';
+
+  if(dadosPagamento.valor_final <= 0){
+   await registrarDadosPagamentoEvento(ev.id, dadosPagamento, 'paddle', 'cupom_integral');
+   const { data: pagamentoConfirmado, error: updateError } = await getSupabase().from('eventos').update({
+    status_pagamento:'pago',
+    pagamento_provedor:'paddle',
+    pagamento_referencia:'cupom_integral',
+    pagamento_confirmado_em:new Date().toISOString(),
+    data_ultima_edicao:new Date().toISOString()
+   }).eq('id', ev.id).is('pagamento_confirmado_em', null).select().maybeSingle();
+   if(updateError) throw updateError;
+   if(pagamentoConfirmado){
+    await incrementarUsoCupomSeAplicavel(dadosPagamento.cupom_codigo);
+    await incrementarUsoCupomSeAplicavel(dadosPagamento.cupom_codigo);
+    await liberarAutomaticamenteAposPagamento(ev.id);
+   }
+   return res.json({ok:true,ja_pago:true,cortesia:true,calculo:dadosPagamento,mensagem:'Cupom integral aplicado.'});
+  }
+
   const response = await fetch(PADDLE_API_BASE + '/transactions', {
    method:'POST',
    headers:{'Authorization':'Bearer '+PADDLE_API_KEY,'Content-Type':'application/json'},
    body:JSON.stringify({
-    items:[{price_id:PADDLE_PRICE_ID, quantity:1}],
-    custom_data:{evento_id:ev.id,email_usuario:ev.email_usuario,origem:'audesc'}
+    items:[{
+     price:{
+      name:'Evento Audesc',
+      description:'Publicação e transmissão de audiodescrição ao vivo pelo Audesc',
+      product:{
+       name:'Evento Audesc',
+       tax_category:'saas'
+      },
+      unit_price:{
+       amount:valorMenorUnidade(dadosPagamento.valor_final),
+       currency_code:dadosPagamento.moeda
+      }
+     },
+     quantity:1
+    }],
+    custom_data:{
+     evento_id:ev.id,
+     email_usuario:ev.email_usuario,
+     origem:'audesc',
+     moeda:dadosPagamento.moeda,
+     valor_original:dadosPagamento.valor_original,
+     valor_final:dadosPagamento.valor_final,
+     cupom_codigo:dadosPagamento.cupom_codigo
+    }
    })
   });
 
@@ -592,13 +908,9 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
   const tx = body.data || body;
   const checkoutUrl = tx.checkout?.url || tx.checkout_url || tx.url || null;
 
-  await getSupabase().from('eventos').update({
-   pagamento_provedor:'paddle',
-   pagamento_referencia:tx.id || null,
-   data_ultima_edicao:new Date().toISOString()
-  }).eq('id', ev.id);
+  await registrarDadosPagamentoEvento(ev.id, dadosPagamento, 'paddle', tx.id || null);
 
-  res.json({ok:true,transaction:tx,checkout_url:checkoutUrl});
+  res.json({ok:true,transaction:tx,checkout_url:checkoutUrl,calculo:dadosPagamento});
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message || 'Erro ao criar transação Paddle.'});
@@ -704,6 +1016,7 @@ async function confirmarPagamentoMercadoPago(eventoId, paymentId){
    return {ok:true, skipped:true, reason:'Pagamento já confirmado anteriormente.'};
   }
 
+  await incrementarUsoCupomSeAplicavel(pagamentoConfirmado.cupom_codigo);
   const liberacao = await liberarAutomaticamenteAposPagamento(eventoId).catch(e => {
    console.error('MERCADO PAGO: erro na liberação automática pós-pagamento:', e);
    return {ok:false, error:String(e && e.message ? e.message : e)};
@@ -871,6 +1184,7 @@ app.post('/webhooks/paddle', async (req,res)=>{
    }else{
     console.log('WEBHOOK PADDLE: pagamento confirmado pela primeira vez:', eventoId);
 
+    await incrementarUsoCupomSeAplicavel(pagamentoConfirmado.cupom_codigo);
     liberacao_automatica = await liberarAutomaticamenteAposPagamento(eventoId).catch(e => {
      console.error('WEBHOOK PADDLE: erro na liberação automática pós-pagamento:', e);
      return { ok:false, error:String(e && e.message ? e.message : e) };
