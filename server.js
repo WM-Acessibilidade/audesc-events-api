@@ -190,9 +190,30 @@ async function incrementarUsoCupomSeAplicavel(codigo){
 }
 
 
+
+
+async function obterStatusEmail(email){
+  const e = text(email).toLowerCase();
+  if(!e) return {email:'',status:'comum'};
+  const {data,error} = await getSupabase().from('email_status').select('*').eq('email', e).maybeSingle();
+  if(error) throw error;
+  return data || {email:e,status:'comum'};
+}
+
+async function emailBloqueado(email){
+  const st = await obterStatusEmail(email);
+  return st.status === 'bloqueado';
+}
+
+async function emailConfiavel(email){
+  const st = await obterStatusEmail(email);
+  return st.status === 'confiavel';
+}
+
+
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v24.1-precificacao-eur-portugal'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v25-gerenciar-emails'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -200,13 +221,15 @@ app.post('/criar-evento', async (req,res)=>{
   if(!user) return res.status(401).json({error:'E-mail ainda não verificado. Solicite e confirme o código antes de cadastrar o evento.'});
   const b=req.body||{};
   if(text(b.website)) return res.status(400).json({error:'Solicitação inválida.'});
+  if(await emailBloqueado(user.email)) return res.status(403).json({error:'Este e-mail está bloqueado para cadastro de eventos.'});
+  const usuarioConfiavel = await emailConfiavel(user.email);
   const tipo_servico=text(b.tipo_servico)==='divulgacao_gratuita'?'divulgacao_gratuita':'audesc_transmissao';
   const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
   const titulo=limit(b.titulo_original,200);
   if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:tipo_evento==='publico'?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
       uf: text(b.pais)==='Outros' ? '' : text(b.uf),
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
@@ -517,6 +540,195 @@ app.get('/pagamentos/calcular/:id', async (req,res)=>{
 });
 
 
+
+
+app.get('/admin/emails', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const sb=getSupabase();
+
+  const {data:eventos,error:eventosError}=await sb
+   .from('eventos')
+   .select('email_usuario,created_at')
+   .not('email_usuario','is',null)
+   .limit(1000);
+  if(eventosError) throw eventosError;
+
+  const {data:notifs,error:notifsError}=await sb
+   .from('notificacoes')
+   .select('email,ativo,email_validado,updated_at')
+   .not('email','is',null)
+   .limit(1000);
+  if(notifsError) throw notifsError;
+
+  const {data:statusRows,error:statusError}=await sb
+   .from('email_status')
+   .select('*');
+  if(statusError) throw statusError;
+
+  const mapa=new Map();
+
+  function garantir(email){
+   const e=text(email).toLowerCase();
+   if(!e) return null;
+   if(!mapa.has(e)){
+    mapa.set(e,{
+     email:e,
+     origem_eventos:false,
+     origem_notificacoes:false,
+     total_eventos:0,
+     notificacoes_ativas:false,
+     notificacoes_validadas:false,
+     status:'comum',
+     observacao:'',
+     atualizado_em:null
+    });
+   }
+   return mapa.get(e);
+  }
+
+  for(const ev of eventos||[]){
+   const item=garantir(ev.email_usuario);
+   if(item){
+    item.origem_eventos=true;
+    item.total_eventos++;
+   }
+  }
+
+  for(const n of notifs||[]){
+   const item=garantir(n.email);
+   if(item){
+    item.origem_notificacoes=true;
+    item.notificacoes_ativas = item.notificacoes_ativas || !!n.ativo;
+    item.notificacoes_validadas = item.notificacoes_validadas || !!n.email_validado;
+   }
+  }
+
+  for(const s of statusRows||[]){
+   const item=garantir(s.email);
+   if(item){
+    item.status=s.status || 'comum';
+    item.observacao=s.observacao || '';
+    item.atualizado_em=s.atualizado_em || null;
+   }
+  }
+
+  const emails=[...mapa.values()].sort((a,b)=>a.email.localeCompare(b.email));
+  res.json({ok:true,total:emails.length,emails});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao listar e-mails.'});
+ }
+});
+
+app.patch('/admin/emails/status', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const emails=Array.isArray(req.body?.emails)?req.body.emails:[];
+  const statusEmail=text(req.body?.status);
+  const observacao=text(req.body?.observacao);
+  if(!['comum','confiavel','bloqueado'].includes(statusEmail)) return res.status(400).json({error:'Status inválido.'});
+  if(!emails.length) return res.status(400).json({error:'Selecione ao menos um e-mail.'});
+
+  const sb=getSupabase();
+  const resultados=[];
+  for(const raw of emails){
+   const email=text(raw).toLowerCase();
+   if(!email || !email.includes('@')) continue;
+   const payload={email,status:statusEmail,observacao,atualizado_em:new Date().toISOString()};
+   const {data,error}=await sb.from('email_status').upsert(payload,{onConflict:'email'}).select().single();
+   if(error) throw error;
+   resultados.push(data);
+  }
+  res.json({ok:true,total:resultados.length,emails:resultados});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao atualizar status de e-mails.'});
+ }
+});
+
+app.delete('/admin/emails', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const emails=Array.isArray(req.body?.emails)?req.body.emails.map(e=>text(e).toLowerCase()).filter(Boolean):[];
+  if(!emails.length) return res.status(400).json({error:'Selecione ao menos um e-mail.'});
+
+  const sb=getSupabase();
+  await sb.from('notificacoes').delete().in('email', emails);
+  await sb.from('email_status').delete().in('email', emails);
+
+  res.json({
+   ok:true,
+   mensagem:'E-mails removidos das notificações e da lista de controle. Eventos já cadastrados foram preservados.',
+   total:emails.length
+  });
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao excluir e-mails.'});
+ }
+});
+
+app.post('/admin/emails/enviar-mensagem', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  if(!RESEND_API_KEY) return res.status(500).json({error:'RESEND_API_KEY não configurada.'});
+
+  const emails=Array.isArray(req.body?.emails)?req.body.emails.map(e=>text(e).toLowerCase()).filter(Boolean):[];
+  const assunto=limit(req.body?.assunto,200);
+  const mensagem=text(req.body?.mensagem);
+  const anexos=Array.isArray(req.body?.anexos)?req.body.anexos:[];
+
+  if(!emails.length) return res.status(400).json({error:'Selecione ao menos um e-mail.'});
+  if(!assunto) return res.status(400).json({error:'Informe o assunto.'});
+  if(!mensagem) return res.status(400).json({error:'Informe a mensagem.'});
+
+  const attachments = anexos
+   .filter(a=>a && a.filename && a.content)
+   .slice(0,3)
+   .map(a=>({filename:String(a.filename).slice(0,120),content:String(a.content)}));
+
+  const response = await fetch('https://api.resend.com/emails', {
+   method:'POST',
+   headers:{
+    'Authorization':`Bearer ${RESEND_API_KEY}`,
+    'Content-Type':'application/json'
+   },
+   body:JSON.stringify({
+    from:RESEND_FROM_EMAIL,
+    to:emails,
+    subject:assunto,
+    text:mensagem,
+    attachments
+   })
+  });
+
+  const body=await response.json().catch(()=>({}));
+
+  if(!response.ok){
+   console.error('Erro ao enviar mensagem administrativa:', body);
+   return res.status(response.status).json({error:'Erro ao enviar mensagem.',details:body});
+  }
+
+  try{
+   await getSupabase().from('email_envios').insert({
+    destinatarios:emails,
+    assunto,
+    mensagem,
+    anexos_nomes:attachments.map(a=>a.filename),
+    enviado_em:new Date().toISOString()
+   });
+  }catch(e){
+   console.warn('Não foi possível registrar histórico de envio:', e.message||e);
+  }
+
+  res.json({ok:true,total:emails.length,response:body});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao enviar mensagem.'});
+ }
+});
+
+
 app.get('/admin/eventos', async (req, res) => {
   try {
     if (!admin(req, res)) return;
@@ -599,6 +811,7 @@ app.post('/notificacoes/solicitar', async (req,res)=>{
   if(text(b.website)) return res.status(400).json({error:'Solicitação inválida.'});
   const email=text(b.email).toLowerCase();
   if(!email || !email.includes('@')) return res.status(400).json({error:'Informe um e-mail válido.'});
+  if(await emailBloqueado(email)) return res.status(403).json({error:'Este e-mail está bloqueado para cadastro de notificações.'});
   const payload={email,receber_todos:!!b.receber_todos,pais:text(b.pais),uf:text(b.uf),eventos_ids:Array.isArray(b.eventos_ids)?b.eventos_ids:[],updated_at:new Date().toISOString()};
   const sb=getSupabase();
   const {data:existing,error:findError}=await sb.from('notificacoes').select('*').eq('email',email).maybeSingle();
