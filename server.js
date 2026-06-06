@@ -59,7 +59,17 @@ async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const
 
 
 function moedaDoEvento(ev){
-  return String(ev?.pais || '').trim().toLowerCase() === 'brasil' ? 'BRL' : 'USD';
+  const pais = String(ev?.pais || '').trim().toLowerCase();
+
+  if(pais === 'brasil') return 'BRL';
+
+  const paisesEuro = [
+    'portugal'
+  ];
+
+  if(paisesEuro.includes(pais)) return 'EUR';
+
+  return 'USD';
 }
 
 function arredondarValor(v){
@@ -182,7 +192,7 @@ async function incrementarUsoCupomSeAplicavel(codigo){
 
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v24-precificacao-cupons'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v24.1-precificacao-eur-portugal'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
