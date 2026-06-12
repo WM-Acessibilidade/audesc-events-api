@@ -213,7 +213,7 @@ async function emailConfiavel(email){
 
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v25-gerenciar-emails'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v26-meus-eventos-preview-edicao'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -1481,6 +1481,54 @@ app.delete('/meus-eventos/:id', async (req,res)=>{
   res.status(500).json({
    error:e.message || 'Erro ao excluir evento.'
   });
+ }
+});
+
+
+
+app.patch('/meus-eventos/:id', async (req,res)=>{
+ try{
+  const user = await getUser(req);
+  if(!user || !user.email) return res.status(401).json({error:'E-mail não autenticado. Acesse pelo link de validação.'});
+  const email = String(user.email || '').trim().toLowerCase();
+  const sb = getSupabase();
+  const {data:ev,error:findError} = await sb.from('eventos').select('*').eq('id', req.params.id).eq('email_usuario', email).single();
+  if(findError) throw findError;
+  if(!ev) return res.status(404).json({error:'Evento não encontrado para este e-mail.'});
+  if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
+   return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
+  }
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','pais','uf'];
+  const update = {};
+  for(const key of allowed){
+   if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
+  }
+  if(Object.prototype.hasOwnProperty.call(update,'titulo_original')){
+   update.titulo_original = limit(update.titulo_original,200);
+   if(!update.titulo_original) return res.status(400).json({error:'Informe o nome do evento.'});
+  }
+  if(Object.prototype.hasOwnProperty.call(update,'descricao_original')) update.descricao_original = limit(update.descricao_original,5000);
+  ['site_oficial','link_ingressos','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
+  if(Object.prototype.hasOwnProperty.call(update,'duracao_horas')) update.duracao_horas = Math.max(1,Math.min(8,Number(update.duracao_horas||1)));
+  if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes')){
+   const n=Math.max(10,Math.min(500,Number(update.max_ouvintes||10)));
+   update.max_ouvintes=Math.ceil(n/10)*10;
+  }
+  if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
+  if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
+  if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = text(update.uf);
+  update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
+  update.descricao_publicada = Object.prototype.hasOwnProperty.call(update,'descricao_original') ? update.descricao_original : (ev.descricao_publicada || ev.descricao_original);
+  update.data_ultima_edicao = new Date().toISOString();
+  if(ev.tipo_evento === 'publico' || update.tipo_evento === 'publico'){
+   update.status_publicacao = await emailConfiavel(email) ? 'aprovado' : 'pendente';
+  }
+  const {data,error}=await sb.from('eventos').update(update).eq('id', req.params.id).eq('email_usuario', email).select().single();
+  if(error) throw error;
+  res.json({ok:true,evento:data,mensagem:'Evento atualizado.'});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message || 'Erro ao atualizar evento.'});
  }
 });
 
