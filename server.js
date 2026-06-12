@@ -213,7 +213,7 @@ async function emailConfiavel(email){
 
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v26-meus-eventos-preview-edicao'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v27-meus-eventos-filtros-servico'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -1498,7 +1498,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','pais','uf'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -1515,6 +1515,10 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
    update.max_ouvintes=Math.ceil(n/10)*10;
   }
   if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
+  if(Object.prototype.hasOwnProperty.call(update,'tipo_servico')){
+   update.tipo_servico = text(update.tipo_servico)==='divulgacao_gratuita' ? 'divulgacao_gratuita' : 'audesc_transmissao';
+   update.status_pagamento = update.tipo_servico === 'divulgacao_gratuita' ? 'dispensado' : 'pendente';
+  }
   if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
   if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = text(update.uf);
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
