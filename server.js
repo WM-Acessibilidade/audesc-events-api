@@ -213,7 +213,7 @@ async function emailConfiavel(email){
 
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v28-ajustes-meus-eventos'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v29-filtro-radio-acessivel'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
