@@ -58,17 +58,18 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 
 
+function paisPagamentoEvento(ev){
+  const pais = String(ev?.pais || '').trim();
+  if(pais.toLowerCase() === 'internacional' && ev?.origem_transmissao){
+    return String(ev.origem_transmissao || '').trim();
+  }
+  return pais;
+}
+
 function moedaDoEvento(ev){
-  const pais = String(ev?.pais || '').trim().toLowerCase();
-
+  const pais = paisPagamentoEvento(ev).toLowerCase();
   if(pais === 'brasil') return 'BRL';
-
-  const paisesEuro = [
-    'portugal'
-  ];
-
-  if(paisesEuro.includes(pais)) return 'EUR';
-
+  if(pais === 'portugal') return 'EUR';
   return 'USD';
 }
 
@@ -76,7 +77,21 @@ function arredondarValor(v){
   return Math.max(0, Math.round(Number(v || 0) * 100) / 100);
 }
 
-async function obterPrecificacao(moeda){
+async function obterPrecificacao(moeda, tipoServico){
+  const servico = text(tipoServico) || 'audesc_transmissao';
+  try{
+    const { data: servicoData, error: servicoError } = await getSupabase()
+      .from('precificacao_servicos')
+      .select('*')
+      .eq('moeda', moeda)
+      .eq('tipo_servico', servico)
+      .maybeSingle();
+    if(servicoError) throw servicoError;
+    if(servicoData) return servicoData;
+  }catch(e){
+    console.warn('Usando precificacao padrão:', e.message || e);
+  }
+
   const { data, error } = await getSupabase()
     .from('precificacao')
     .select('*')
@@ -113,7 +128,7 @@ function calcularValorPacote(ev, precificacao){
 
 async function calcularPagamentoEvento(ev, codigoCupom){
   const moeda = moedaDoEvento(ev);
-  const precificacao = await obterPrecificacao(moeda);
+  const precificacao = await obterPrecificacao(moeda, ev.tipo_servico);
   const pacote = calcularValorPacote(ev, precificacao);
 
   let cupom = null;
@@ -213,7 +228,7 @@ async function emailConfiavel(email){
 
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v30-filtro-sem-repeticao-leitor'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v34-cadastro-servicos-origem'}));
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -223,14 +238,17 @@ app.post('/criar-evento', async (req,res)=>{
   if(text(b.website)) return res.status(400).json({error:'Solicitação inválida.'});
   if(await emailBloqueado(user.email)) return res.status(403).json({error:'Este e-mail está bloqueado para cadastro de eventos.'});
   const usuarioConfiavel = await emailConfiavel(user.email);
-  const tipo_servico=text(b.tipo_servico)==='divulgacao_gratuita'?'divulgacao_gratuita':'audesc_transmissao';
+  const tiposServicoValidos=['audesc_transmissao','divulgacao_gratuita','audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+  const tipoSolicitado=text(b.tipo_servico);
+  const tipo_servico=tiposServicoValidos.includes(tipoSolicitado)?tipoSolicitado:'audesc_transmissao';
   const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
   const titulo=limit(b.titulo_original,200);
   if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
   const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
-      uf: text(b.pais)==='Outros' ? '' : text(b.uf),
+      uf: (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf),
+      origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
@@ -799,7 +817,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,origem_transmissao,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -944,7 +962,7 @@ app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
   if(!ev) return res.status(404).json({error:'Evento não encontrado para este e-mail.'});
   if(ev.status_pagamento === 'pago') return res.json({ok:true,ja_pago:true,mensagem:'Evento já está pago.'});
 
-  if(String(ev.pais || '').trim().toLowerCase() !== 'brasil'){
+  if(paisPagamentoEvento(ev).toLowerCase() !== 'brasil'){
    return res.status(400).json({error:'Mercado Pago está disponível apenas para eventos do Brasil. Para outros países, use o pagamento internacional.'});
   }
 
@@ -1068,7 +1086,7 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
   if(ev.status_pagamento === 'pago') return res.json({ok:true,ja_pago:true,mensagem:'Evento já está pago.'});
 
   const dadosPagamento = await calcularPagamentoEvento(ev, codigoCupom);
-  if(String(ev.pais || '').trim().toLowerCase() === 'brasil'){
+  if(paisPagamentoEvento(ev).toLowerCase() === 'brasil'){
    return res.status(400).json({error:'Paddle é usado apenas para pagamentos internacionais. Para Brasil, use Mercado Pago.'});
   }
   if(!['USD','EUR'].includes(dadosPagamento.moeda)) dadosPagamento.moeda = 'USD';
