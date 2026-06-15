@@ -228,7 +228,27 @@ async function emailConfiavel(email){
 
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v34-cadastro-servicos-origem'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v36-agenda-profissionais'}));
+
+
+const SERVICOS_COM_AGENDA = ['audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+function requerAgendaProfissional(ev){
+  return SERVICOS_COM_AGENDA.includes(String(ev?.tipo_servico || '').trim());
+}
+function statusAgendaEvento(ev){
+  if(!requerAgendaProfissional(ev)) return 'nao_aplicavel';
+  return String(ev?.status_agenda || 'pendente').trim();
+}
+function pagamentoBloqueadoPorAgenda(ev){
+  return requerAgendaProfissional(ev) && statusAgendaEvento(ev) !== 'disponivel';
+}
+function mensagemAgenda(ev){
+  const status = statusAgendaEvento(ev);
+  if(status === 'indisponivel') return 'Impossibilidade do serviço - profissional indisponível.';
+  if(status === 'disponivel') return 'Disponibilidade de agenda confirmada.';
+  return 'Verificando disponibilidade de agenda.';
+}
+
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -246,7 +266,7 @@ app.post('/criar-evento', async (req,res)=>{
   if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
       uf: (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf),
       origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
@@ -558,6 +578,55 @@ app.get('/pagamentos/calcular/:id', async (req,res)=>{
 });
 
 
+
+
+
+app.get('/admin/agenda-pendencias', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const sb=getSupabase();
+  const {data,error}=await sb
+   .from('eventos')
+   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,origem_transmissao,data_evento,status_agenda,observacao_agenda,status_pagamento,status_publicacao,status_operacao,created_at')
+   .in('tipo_servico', SERVICOS_COM_AGENDA)
+   .order('created_at',{ascending:false})
+   .limit(300);
+  if(error) throw error;
+  const eventos=(data||[]).map(ev=>Object.assign({},ev,{status_agenda:statusAgendaEvento(ev)}));
+  res.json({ok:true,eventos});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao listar pendências de agenda.'});
+ }
+});
+
+app.patch('/admin/eventos/:id/agenda', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const status=text(req.body?.status_agenda || req.body?.status);
+  if(!['pendente','disponivel','indisponivel'].includes(status)){
+   return res.status(400).json({error:'Status de agenda inválido.'});
+  }
+  const update={
+   status_agenda:status,
+   observacao_agenda:text(req.body?.observacao_agenda || req.body?.observacao),
+   agenda_atualizado_em:new Date().toISOString(),
+   data_ultima_edicao:new Date().toISOString()
+  };
+  if(status === 'disponivel') update.status_pagamento='pendente';
+  const {data,error}=await getSupabase()
+   .from('eventos')
+   .update(update)
+   .eq('id',req.params.id)
+   .select()
+   .single();
+  if(error) throw error;
+  res.json({ok:true,evento:data});
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao atualizar agenda do evento.'});
+ }
+});
 
 
 app.get('/admin/emails', async (req,res)=>{
@@ -961,6 +1030,7 @@ app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
   if(error) throw error;
   if(!ev) return res.status(404).json({error:'Evento não encontrado para este e-mail.'});
   if(ev.status_pagamento === 'pago') return res.json({ok:true,ja_pago:true,mensagem:'Evento já está pago.'});
+  if(pagamentoBloqueadoPorAgenda(ev)) return res.status(409).json({error:mensagemAgenda(ev),status_agenda:statusAgendaEvento(ev)});
 
   if(paisPagamentoEvento(ev).toLowerCase() !== 'brasil'){
    return res.status(400).json({error:'Mercado Pago está disponível apenas para eventos do Brasil. Para outros países, use o pagamento internacional.'});
@@ -1084,6 +1154,7 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
   if(error) throw error;
   if(!ev) return res.status(404).json({error:'Evento não encontrado para este e-mail.'});
   if(ev.status_pagamento === 'pago') return res.json({ok:true,ja_pago:true,mensagem:'Evento já está pago.'});
+  if(pagamentoBloqueadoPorAgenda(ev)) return res.status(409).json({error:mensagemAgenda(ev),status_agenda:statusAgendaEvento(ev)});
 
   const dadosPagamento = await calcularPagamentoEvento(ev, codigoCupom);
   if(paisPagamentoEvento(ev).toLowerCase() === 'brasil'){
