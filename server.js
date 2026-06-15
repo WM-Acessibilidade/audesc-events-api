@@ -126,10 +126,47 @@ function calcularValorPacote(ev, precificacao){
   };
 }
 
+
+function numeroSeguro(v, padrao=0){const n=Number(v);return Number.isFinite(n)?n:padrao;}
+async function obterPrecoServico(tipoServico, moeda){
+ const servico=text(tipoServico)||'audesc_transmissao';
+ try{
+  const {data,error}=await getSupabase().from('precificacao_servicos').select('*').eq('tipo_servico',servico).eq('moeda',moeda).maybeSingle();
+  if(error) throw error;
+  return data||null;
+ }catch(e){console.warn('Preço de serviço indisponível:',e.message||e);return null;}
+}
+async function calcularValorBaseServico(ev, moeda){
+ const tipo=text(ev.tipo_servico)||'audesc_transmissao';
+ const duracao=Math.max(1,Number(ev.duracao_horas||1));
+ const ouvintes=Math.max(10,Number(ev.max_ouvintes||10));
+ if(tipo==='divulgacao_gratuita') return {valor_original:0,ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:'Divulgação gratuita'}};
+ if(tipo==='somente_audiodescritor'||tipo==='somente_consultor'){
+  const preco=await obterPrecoServico(tipo,moeda);
+  const valorHora=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
+  return {valor_original:arredondarValor(valorHora*duracao),ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:tipo==='somente_audiodescritor'?'Somente audiodescritor':'Somente consultor',valor_hora:valorHora}};
+ }
+ if(tipo==='audesc_com_audiodescritor'){
+  const pAud=await obterPrecificacao(moeda,'audesc_transmissao');
+  const pacoteAud=calcularValorPacote(ev,pAud);
+  const pAd=await obterPrecoServico('somente_audiodescritor',moeda);
+  const valorHoraAd=pAd?numeroSeguro(pAd.valor_hora,pAd.valor_base_10_ouvintes_1_hora):0;
+  const valorAd=arredondarValor(valorHoraAd*duracao);
+  return {valor_original:arredondarValor(pacoteAud.valor_original+valorAd),ouvintes:pacoteAud.ouvintes,duracao_horas:pacoteAud.duracao_horas,tipo_servico:tipo,detalhes:{descricao:'Serviço completo - Audesc + audiodescritor',valor_audesc:pacoteAud.valor_original,valor_audiodescritor:valorAd,valor_hora_audiodescritor:valorHoraAd}};
+ }
+ return null;
+}
+
 async function calcularPagamentoEvento(ev, codigoCupom){
   const moeda = moedaDoEvento(ev);
-  const precificacao = await obterPrecificacao(moeda, ev.tipo_servico);
-  const pacote = calcularValorPacote(ev, precificacao);
+  const servicoCalculado = await calcularValorBaseServico(ev, moeda);
+  let pacote = null;
+  if(servicoCalculado){
+    pacote = servicoCalculado;
+  }else{
+    const precificacao = await obterPrecificacao(moeda, ev.tipo_servico);
+    pacote = calcularValorPacote(ev, precificacao);
+  }
 
   let cupom = null;
   let desconto = 0;
@@ -228,7 +265,7 @@ async function emailConfiavel(email){
 
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v36-agenda-profissionais'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v37-precos-profissionais'}));
 
 
 const SERVICOS_COM_AGENDA = ['audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
@@ -580,6 +617,26 @@ app.get('/pagamentos/calcular/:id', async (req,res)=>{
 
 
 
+
+
+app.get('/admin/precificacao-servicos', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const {data,error}=await getSupabase().from('precificacao_servicos').select('*').order('tipo_servico',{ascending:true}).order('moeda',{ascending:true});
+  if(error) throw error;
+  res.json({ok:true,precificacao:data||[]});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao carregar precificação dos serviços.'});}
+});
+app.patch('/admin/precificacao-servicos/:id', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const b=req.body||{};
+  const update={valor_base_10_ouvintes_1_hora:Number(b.valor_base_10_ouvintes_1_hora||0),acrescimo_por_10_ouvintes:Number(b.acrescimo_por_10_ouvintes||0),valor_hora:Number(b.valor_hora||0),ouvintes_minimos:Number(b.ouvintes_minimos||10),duracao_minima_horas:Number(b.duracao_minima_horas||1),atualizado_em:new Date().toISOString()};
+  const {data,error}=await getSupabase().from('precificacao_servicos').update(update).eq('id',req.params.id).select().single();
+  if(error) throw error;
+  res.json({ok:true,precificacao:data});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar precificação do serviço.'});}
+});
 
 app.get('/admin/agenda-pendencias', async (req,res)=>{
  try{
