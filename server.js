@@ -140,7 +140,11 @@ async function calcularValorBaseServico(ev, moeda){
  const tipo=text(ev.tipo_servico)||'audesc_transmissao';
  const duracao=Math.max(1,Number(ev.duracao_horas||1));
  const ouvintes=Math.max(10,Number(ev.max_ouvintes||10));
- if(tipo==='divulgacao_gratuita') return {valor_original:0,ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:'Divulgação'}};
+ if(tipo==='divulgacao_gratuita'){
+  const preco=await obterPrecoServico(tipo,moeda);
+  const valorServico=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
+  return {valor_original:arredondarValor(valorServico),ouvintes:null,duracao_horas:1,tipo_servico:tipo,detalhes:{descricao:'Divulgação no Audesc',valor_servico:valorServico}};
+ }
  if(tipo==='somente_audiodescritor'||tipo==='somente_consultor'){
   const preco=await obterPrecoServico(tipo,moeda);
   const valorHora=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
@@ -286,6 +290,38 @@ function mensagemAgenda(ev){
   return 'Verificando disponibilidade de agenda.';
 }
 
+async function statusPagamentoInicial(ev){
+  if(String(ev?.tipo_servico || '').trim() === 'divulgacao_gratuita'){
+    const dados = await calcularPagamentoEvento(ev, '');
+    return dados.valor_final > 0 ? 'pendente' : 'dispensado';
+  }
+  return 'pendente';
+}
+
+async function sincronizarStatusPagamentoDivulgacao(ev){
+  if(!ev || String(ev.tipo_servico || '').trim() !== 'divulgacao_gratuita') return ev;
+  if(ev.status_pagamento === 'pago') return ev;
+  const statusCalculado = await statusPagamentoInicial(ev);
+  if(ev.status_pagamento === statusCalculado) return ev;
+  try{
+    const { data, error } = await getSupabase().from('eventos').update({
+      status_pagamento: statusCalculado,
+      data_ultima_edicao: new Date().toISOString()
+    }).eq('id', ev.id).select().single();
+    if(error) throw error;
+    return data || {...ev, status_pagamento: statusCalculado};
+  }catch(e){
+    console.warn('Não foi possível sincronizar status de pagamento da divulgação:', e.message || e);
+    return {...ev, status_pagamento: statusCalculado};
+  }
+}
+
+async function sincronizarListaStatusPagamentoDivulgacao(lista){
+  const out=[];
+  for(const ev of (lista || [])) out.push(await sincronizarStatusPagamentoDivulgacao(ev));
+  return out;
+}
+
 
 app.post('/criar-evento', async (req,res)=>{
  try{
@@ -303,10 +339,11 @@ app.post('/criar-evento', async (req,res)=>{
   if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais),
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais),
       uf: (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf),
       origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
+  ev.status_pagamento = await statusPagamentoInicial(ev);
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
   res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data});
@@ -462,8 +499,9 @@ async function liberar(req,res){
   const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
   if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
   if(ev.status_publicacao!=='aprovado') return res.status(400).json({error:'Evento ainda não está aprovado.'});
-  if(ev.tipo_servico==='audesc_transmissao' && ev.status_pagamento!=='pago') return res.status(400).json({error:'Evento ainda não consta como pago.'});
-  if(ev.tipo_servico==='divulgacao_gratuita'){
+  const evSincronizado = await sincronizarStatusPagamentoDivulgacao(ev);
+  if((evSincronizado.tipo_servico==='audesc_transmissao' || evSincronizado.tipo_servico==='audesc_com_audiodescritor' || evSincronizado.tipo_servico==='divulgacao_gratuita') && evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
+  if(evSincronizado.tipo_servico==='divulgacao_gratuita'){
    const {data:up,error:er}=await sb.from('eventos').update({status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
    if(er) throw er; return res.json({ok:true,tipo:'divulgacao_gratuita',evento:up});
   }
@@ -1039,7 +1077,8 @@ app.get('/meus-eventos', async (req,res)=>{
 
   if(error) throw error;
 
-  res.json({ok:true,email,total:data.length,eventos:data});
+  const eventos = await sincronizarListaStatusPagamentoDivulgacao(data || []);
+  res.json({ok:true,email,total:eventos.length,eventos});
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message || 'Erro ao carregar eventos.'});
@@ -1666,7 +1705,8 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
    const tiposServicoValidos=['audesc_transmissao','divulgacao_gratuita','audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
    const tipoSolicitado=text(update.tipo_servico);
    update.tipo_servico = tiposServicoValidos.includes(tipoSolicitado) ? tipoSolicitado : (ev.tipo_servico || 'audesc_transmissao');
-   update.status_pagamento = update.tipo_servico === 'divulgacao_gratuita' ? 'dispensado' : 'pendente';
+   const evAtualizadoParaCalculo = {...ev, ...update};
+   update.status_pagamento = await statusPagamentoInicial(evAtualizadoParaCalculo);
    update.status_agenda = SERVICOS_COM_AGENDA.includes(update.tipo_servico) ? 'pendente' : 'nao_aplicavel';
    update.status_operacao = 'nao_liberado';
   }
@@ -1696,7 +1736,8 @@ app.get('/meus-eventos/:id', async (req,res)=>{
   const {data,error} = await getSupabase().from('eventos').select('*').eq('id', req.params.id).eq('email_usuario', email).single();
   if(error) throw error;
   if(!data) return res.status(404).json({error:'Evento não encontrado para este e-mail.'});
-  res.json({ok:true,email,evento:data});
+  const evento = await sincronizarStatusPagamentoDivulgacao(data);
+  res.json({ok:true,email,evento});
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message || 'Erro ao carregar evento.'});
