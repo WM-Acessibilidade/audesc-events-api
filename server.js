@@ -58,6 +58,12 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 
 
+function numeroCoordenada(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+}
+
 function paisPagamentoEvento(ev){
   const pais = String(ev?.pais || '').trim();
   if(pais.toLowerCase() === 'internacional' && ev?.origem_transmissao){
@@ -339,7 +345,7 @@ app.post('/criar-evento', async (req,res)=>{
   if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais),
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais: text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais),
       uf: (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf),
       origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
@@ -682,7 +688,7 @@ app.get('/admin/agenda-pendencias', async (req,res)=>{
   const sb=getSupabase();
   const {data,error}=await sb
    .from('eventos')
-   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,origem_transmissao,data_evento,status_agenda,observacao_agenda,status_pagamento,status_publicacao,status_operacao,created_at')
+   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,status_pagamento,status_publicacao,status_operacao,created_at')
    .in('tipo_servico', SERVICOS_COM_AGENDA)
    .order('created_at',{ascending:false})
    .limit(300);
@@ -984,7 +990,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,origem_transmissao,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -1684,7 +1690,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf','local_evento','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -1710,6 +1716,9 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
    update.status_agenda = SERVICOS_COM_AGENDA.includes(update.tipo_servico) ? 'pendente' : 'nao_aplicavel';
    update.status_operacao = 'nao_liberado';
   }
+  if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,300);
+  if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
+  if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
   if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
   if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
