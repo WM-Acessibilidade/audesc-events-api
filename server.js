@@ -140,7 +140,7 @@ async function calcularValorBaseServico(ev, moeda){
  const tipo=text(ev.tipo_servico)||'audesc_transmissao';
  const duracao=Math.max(1,Number(ev.duracao_horas||1));
  const ouvintes=Math.max(10,Number(ev.max_ouvintes||10));
- if(tipo==='divulgacao_gratuita') return {valor_original:0,ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:'Divulgação gratuita'}};
+ if(tipo==='divulgacao_gratuita') return {valor_original:0,ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:'Divulgação'}};
  if(tipo==='somente_audiodescritor'||tipo==='somente_consultor'){
   const preco=await obterPrecoServico(tipo,moeda);
   const valorHora=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
@@ -303,7 +303,7 @@ app.post('/criar-evento', async (req,res)=>{
   if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outro' ? text(b.pais_outro) : text(b.pais),
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:tipo_servico==='divulgacao_gratuita'?'dispensado':'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),pais: text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais),
       uf: (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf),
       origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
@@ -1109,7 +1109,6 @@ app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
    if(updateError) throw updateError;
    if(pagamentoConfirmado){
     await incrementarUsoCupomSeAplicavel(dadosPagamento.cupom_codigo);
-    await incrementarUsoCupomSeAplicavel(dadosPagamento.cupom_codigo);
     await liberarAutomaticamenteAposPagamento(ev.id);
    }
    return res.json({ok:true,ja_pago:true,cortesia:true,calculo:dadosPagamento,mensagem:'Cupom integral aplicado.'});
@@ -1233,7 +1232,6 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
    }).eq('id', ev.id).is('pagamento_confirmado_em', null).select().maybeSingle();
    if(updateError) throw updateError;
    if(pagamentoConfirmado){
-    await incrementarUsoCupomSeAplicavel(dadosPagamento.cupom_codigo);
     await incrementarUsoCupomSeAplicavel(dadosPagamento.cupom_codigo);
     await liberarAutomaticamenteAposPagamento(ev.id);
    }
@@ -1665,11 +1663,15 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   }
   if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
   if(Object.prototype.hasOwnProperty.call(update,'tipo_servico')){
-   update.tipo_servico = text(update.tipo_servico)==='divulgacao_gratuita' ? 'divulgacao_gratuita' : 'audesc_transmissao';
+   const tiposServicoValidos=['audesc_transmissao','divulgacao_gratuita','audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+   const tipoSolicitado=text(update.tipo_servico);
+   update.tipo_servico = tiposServicoValidos.includes(tipoSolicitado) ? tipoSolicitado : (ev.tipo_servico || 'audesc_transmissao');
    update.status_pagamento = update.tipo_servico === 'divulgacao_gratuita' ? 'dispensado' : 'pendente';
+   update.status_agenda = SERVICOS_COM_AGENDA.includes(update.tipo_servico) ? 'pendente' : 'nao_aplicavel';
+   update.status_operacao = 'nao_liberado';
   }
   if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
-  if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = text(update.uf);
+  if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
   update.descricao_publicada = Object.prototype.hasOwnProperty.call(update,'descricao_original') ? update.descricao_original : (ev.descricao_publicada || ev.descricao_original);
   update.data_ultima_edicao = new Date().toISOString();
