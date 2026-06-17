@@ -1,0 +1,24 @@
+{
+  "countries": {
+    "BR": ["Brasil", "Brazil"],
+    "PT": ["Portugal"],
+    "AO": ["Angola"],
+    "MZ": ["Moçambique", "Mocambique", "Mozambique"],
+    "CV": ["Cabo Verde", "Cape Verde"],
+    "GW": ["Guiné-Bissau", "Guine-Bissau", "Guinea-Bissau"],
+    "GQ": ["Guiné Equatorial", "Guine Equatorial", "Equatorial Guinea"],
+    "ST": ["São Tomé e Príncipe", "Sao Tome e Principe", "Sao Tome and Principe"],
+    "TL": ["Timor-Leste", "Timor Leste", "East Timor"]
+  },
+  "units": {
+    "BR": {"DF": ["Distrito Federal", "Brasília", "Brasilia", "Taguatinga"], "SP": ["São Paulo", "Sao Paulo"], "RJ": ["Rio de Janeiro"]},
+    "PT": {"LIS": ["Lisboa", "Lisbon"], "POR": ["Porto", "Oporto"], "ACO": ["Açores", "Azores"], "MAD": ["Madeira"]},
+    "AO": {"LUA": ["Luanda"], "CAB": ["Cabinda"]},
+    "MZ": {"MPM": ["Maputo Cidade", "Cidade de Maputo", "Maputo City"], "MAP": ["Maputo"]},
+    "CV": {"ST": ["Santiago"], "SV": ["São Vicente", "Sao Vicente"], "SL": ["Sal"]},
+    "GW": {"BS": ["Setor Autônomo de Bissau", "Sector Autónomo de Bissau", "Bissau"]},
+    "GQ": {"BN": ["Bioko Norte"], "BS": ["Bioko Sul"], "LI": ["Litoral"]},
+    "ST": {"AG": ["Água Grande", "Agua Grande"], "PR": ["Região Autônoma do Príncipe", "Príncipe", "Principe"]},
+    "TL": {"DI": ["Díli", "Dili"], "BA": ["Baucau"], "OE": ["Oecusse", "Oecussi"]}
+  }
+}

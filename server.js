@@ -3,6 +3,8 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { google } = require('googleapis');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -277,29 +279,75 @@ async function emailConfiavel(email){
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
 
+
 function normalizarBuscaLocal(v){
-  return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+  return String(v||'')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase()
+    .replace(/[\u2019']/g,'')
+    .replace(/[^a-z0-9]+/g,' ')
+    .trim();
 }
+function normalizarChaveLocal(v){ return normalizarBuscaLocal(v).replace(/\s+/g,''); }
+function carregarAliasesLocalizacao(){
+  const basico={
+    countries:{
+      BR:['Brasil','Brazil'],PT:['Portugal'],AO:['Angola'],MZ:['Moçambique','Mocambique','Mozambique'],CV:['Cabo Verde','Cape Verde'],GW:['Guiné-Bissau','Guine-Bissau','Guinea-Bissau'],GQ:['Guiné Equatorial','Guine Equatorial','Equatorial Guinea'],ST:['São Tomé e Príncipe','Sao Tome e Principe','São Tomé and Príncipe','Sao Tome and Principe'],TL:['Timor-Leste','Timor Leste','East Timor']
+    },
+    units:{
+      BR:{
+        AC:['Acre'],AL:['Alagoas'],AP:['Amapá','Amapa'],AM:['Amazonas'],BA:['Bahia'],CE:['Ceará','Ceara'],DF:['Distrito Federal','Brasília','Brasilia','Taguatinga'],ES:['Espírito Santo','Espirito Santo'],GO:['Goiás','Goias'],MA:['Maranhão','Maranhao'],MT:['Mato Grosso'],MS:['Mato Grosso do Sul'],MG:['Minas Gerais'],PA:['Pará','Para'],PB:['Paraíba','Paraiba'],PR:['Paraná','Parana'],PE:['Pernambuco'],PI:['Piauí','Piaui'],RJ:['Rio de Janeiro'],RN:['Rio Grande do Norte'],RS:['Rio Grande do Sul'],RO:['Rondônia','Rondonia'],RR:['Roraima'],SC:['Santa Catarina'],SP:['São Paulo','Sao Paulo'],SE:['Sergipe'],TO:['Tocantins']
+      },
+      PT:{LIS:['Lisboa','Lisbon'],POR:['Porto','Oporto'],AVE:['Aveiro'],BEJ:['Beja'],BRA:['Braga'],BGC:['Bragança','Braganca'],CTB:['Castelo Branco'],CBR:['Coimbra'],EVR:['Évora','Evora'],FAR:['Faro'],GUA:['Guarda'],LEI:['Leiria'],PTG:['Portalegre'],STR:['Santarém','Santarem'],SET:['Setúbal','Setubal'],VCT:['Viana do Castelo'],VRL:['Vila Real'],VIS:['Viseu'],ACO:['Açores','Azores'],MAD:['Madeira']},
+      AO:{LUA:['Luanda'],BGO:['Bengo'],BGU:['Benguela'],BIE:['Bié','Bie'],CAB:['Cabinda'],CCU:['Cuando Cubango'],CNO:['Cuanza Norte','Kwanza Norte'],CUS:['Cuanza Sul','Kwanza Sul'],CNN:['Cunene'],HUA:['Huambo'],HUI:['Huíla','Huila'],LNO:['Lunda Norte'],LSU:['Lunda Sul'],MAL:['Malanje'],MOX:['Moxico'],NAM:['Namibe'],UIG:['Uíge','Uige'],ZAI:['Zaire']},
+      MZ:{MPM:['Maputo Cidade','Maputo City','Cidade de Maputo'],MAP:['Maputo'],CD:['Cabo Delgado'],GZ:['Gaza'],IN:['Inhambane'],MN:['Manica'],NA:['Nampula'],NI:['Niassa'],SO:['Sofala'],TE:['Tete'],ZA:['Zambézia','Zambezia']},
+      CV:{BV:['Boa Vista'],BR:['Brava'],FG:['Fogo'],MA:['Maio'],SL:['Sal'],ST:['Santiago'],SA:['Santo Antão','Santo Antao'],SN:['São Nicolau','Sao Nicolau'],SV:['São Vicente','Sao Vicente']},
+      GW:{BA:['Bafatá','Bafata'],BI:['Biombo'],BL:['Bolama/Bijagós','Bolama Bijagos'],CA:['Cacheu'],GA:['Gabú','Gabu'],OI:['Oio'],QU:['Quinara'],TO:['Tombali'],BS:['Setor Autônomo de Bissau','Sector Autónomo de Bissau','Bissau']},
+      GQ:{AN:['Annobón','Annobon'],BN:['Bioko Norte'],BS:['Bioko Sul'],CS:['Centro Sul'],DJ:['Djibloho'],KN:['Kie-Ntem'],LI:['Litoral'],WN:['Wele-Nzas']},
+      ST:{AG:['Água Grande','Agua Grande'],CA:['Cantagalo'],CU:['Caué','Caue'],LE:['Lembá','Lemba'],LO:['Lobata'],MZ:['Mé-Zóchi','Me-Zochi'],PR:['Região Autônoma do Príncipe','Regiao Autonoma do Principe','Príncipe','Principe']},
+      TL:{AL:['Aileu'],AN:['Ainaro'],AT:['Ataúro','Atauro'],BA:['Baucau'],BO:['Bobonaro'],CO:['Covalima'],DI:['Díli','Dili'],ER:['Ermera'],LA:['Lautém','Lautem'],LI:['Liquiçá','Liquica'],MT:['Manatuto'],MF:['Manufahi'],OE:['Oecusse','Oecussi'],VI:['Viqueque']}
+    }
+  };
+  try{
+    const file=path.join(__dirname,'data','location-aliases.json');
+    if(fs.existsSync(file)){
+      const extra=JSON.parse(fs.readFileSync(file,'utf8'));
+      return {
+        countries:{...(basico.countries||{}),...(extra.countries||{})},
+        units:{...(basico.units||{}),...(extra.units||{})}
+      };
+    }
+  }catch(e){ console.warn('Não foi possível carregar aliases de localização:', e.message); }
+  return basico;
+}
+const LOCATION_ALIASES=carregarAliasesLocalizacao();
 function codigoPaisMaps(pais){
-  const mapa={'brasil':'BR','portugal':'PT','angola':'AO','mocambique':'MZ','moçambique':'MZ','cabo verde':'CV','guine-bissau':'GW','guiné-bissau':'GW','guine equatorial':'GQ','guiné equatorial':'GQ','sao tome e principe':'ST','são tomé e príncipe':'ST','timor-leste':'TL'};
-  return mapa[normalizarBuscaLocal(pais)] || '';
+  const alvo=normalizarChaveLocal(pais);
+  if(!alvo) return '';
+  for(const [codigo, nomes] of Object.entries(LOCATION_ALIASES.countries||{})){
+    if(normalizarChaveLocal(codigo)===alvo || (nomes||[]).some(n=>normalizarChaveLocal(n)===alvo)) return codigo.toUpperCase();
+  }
+  return String(pais||'').trim().length===2 ? String(pais).trim().toUpperCase() : '';
 }
-const UF_BRASIL = {
-  'ac':'AC','acre':'AC','al':'AL','alagoas':'AL','ap':'AP','amapa':'AP','amapá':'AP','am':'AM','amazonas':'AM','ba':'BA','bahia':'BA',
-  'ce':'CE','ceara':'CE','ceará':'CE','df':'DF','distrito federal':'DF','brasilia':'DF','brasília':'DF','es':'ES','espirito santo':'ES','espírito santo':'ES',
-  'go':'GO','goias':'GO','goiás':'GO','ma':'MA','maranhao':'MA','maranhão':'MA','mt':'MT','mato grosso':'MT','ms':'MS','mato grosso do sul':'MS',
-  'mg':'MG','minas gerais':'MG','pa':'PA','para':'PA','pará':'PA','pb':'PB','paraiba':'PB','paraíba':'PB','pr':'PR','parana':'PR','paraná':'PR',
-  'pe':'PE','pernambuco':'PE','pi':'PI','piaui':'PI','piauí':'PI','rj':'RJ','rio de janeiro':'RJ','rn':'RN','rio grande do norte':'RN',
-  'rs':'RS','rio grande do sul':'RS','ro':'RO','rondonia':'RO','rondônia':'RO','rr':'RR','roraima':'RR','sc':'SC','santa catarina':'SC',
-  'sp':'SP','sao paulo':'SP','são paulo':'SP','se':'SE','sergipe':'SE','to':'TO','tocantins':'TO'
-};
-function codigoUfBrasil(v){
-  const n=normalizarBuscaLocal(v);
-  return UF_BRASIL[n] || (String(v||'').trim().length===2 ? String(v).trim().toUpperCase() : '');
+function aliasesPais(codigo){ return [codigo, ...((LOCATION_ALIASES.countries||{})[codigo]||[])].filter(Boolean); }
+function codigoUnidadeLocal(paisCodigo, unidade, unidadeTexto){
+  const alvo=[unidade,unidadeTexto].map(normalizarChaveLocal).filter(Boolean);
+  const units=(LOCATION_ALIASES.units||{})[paisCodigo]||{};
+  for(const [codigo, nomes] of Object.entries(units)){
+    const cand=[codigo, ...(nomes||[])].map(normalizarChaveLocal);
+    if(alvo.some(a=>cand.includes(a))) return codigo.toUpperCase();
+  }
+  const bruto=String(unidade||unidadeTexto||'').trim();
+  if(bruto && bruto.length<=6) return bruto.toUpperCase();
+  return '';
 }
-function componenteTexto(comp){
-  return comp?.shortText || comp?.longText || comp?.short_name || comp?.long_name || '';
+function aliasesUnidade(paisCodigo, unidadeCodigo, unidadeTexto){
+  const units=(LOCATION_ALIASES.units||{})[paisCodigo]||{};
+  const nomes=[unidadeCodigo, unidadeTexto, ...(units[unidadeCodigo]||[])].filter(Boolean);
+  return [...new Set(nomes.map(String))];
 }
+function componenteTexto(comp){ return comp?.shortText || comp?.longText || comp?.short_name || comp?.long_name || ''; }
 function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
   const q=text(query);
   const p=text(pais);
@@ -307,6 +355,7 @@ function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
   const variantes=[];
   function add(v){ v=text(v); if(v && !variantes.some(x=>normalizarBuscaLocal(x)===normalizarBuscaLocal(v))) variantes.push(v); }
   if(u && p) add(`${q}, ${u}, ${p}`);
+  if(uf && uf!==ufTexto && p) add(`${q}, ${uf}, ${p}`);
   if(p) add(`${q}, ${p}`);
   add(q);
   const nq=normalizarBuscaLocal(q);
@@ -327,51 +376,58 @@ function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
     if(u && p) add(`Biblioteca Dorina Nowill, Taguatinga, Brasília, ${u}, ${p}`);
     if(p) add(`Biblioteca Braille Dorina Nowill, Taguatinga, ${p}`);
   }
-  return variantes.slice(0,14);
+  return variantes.slice(0,16);
+}
+function textoCorrespondeAlias(texto, aliases){
+  const nt=normalizarBuscaLocal(texto);
+  const kt=normalizarChaveLocal(texto);
+  if(!nt) return false;
+  return (aliases||[]).some(alias=>{
+    const na=normalizarBuscaLocal(alias);
+    const ka=normalizarChaveLocal(alias);
+    return na && (nt===na || kt===ka || nt.includes(na) || na.includes(nt));
+  });
+}
+function paisResultadoValido(textos, ctx){
+  if(!ctx.codigoPais) return true;
+  const aliases=aliasesPais(ctx.codigoPais);
+  return textos.some(t=>String(t||'').toUpperCase()===ctx.codigoPais || textoCorrespondeAlias(t, aliases));
+}
+function unidadeResultadoValida(textos, ctx){
+  if(!ctx.unidadeCodigo || !ctx.uf || ctx.uf==='Nacional') return true;
+  const aliases=aliasesUnidade(ctx.codigoPais, ctx.unidadeCodigo, ctx.ufTexto || ctx.uf);
+  return textos.some(t=>String(t||'').toUpperCase()===ctx.unidadeCodigo || textoCorrespondeAlias(t, aliases));
 }
 function resultadoNominatimDentro(info, ctx){
   const a=info.address||{};
-  if(ctx.codigoPais && String(a.country_code||'').toUpperCase()!==ctx.codigoPais) return false;
-  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
-    const esperado=codigoUfBrasil(ctx.uf) || codigoUfBrasil(ctx.ufTexto);
-    const cod=codigoUfBrasil(a.state_code || (a['ISO3166-2-lvl4']||'').split('-').pop() || a.state || a.region || a.city || '');
-    if(esperado && cod && cod!==esperado) return false;
-    const endereco=normalizarBuscaLocal([a.state,a.region,a.city,a.town,a.county,info.display_name].filter(Boolean).join(' '));
-    if(esperado==='DF' && endereco && !/(distrito federal|brasilia|brasília|taguatinga)/.test(endereco)) return false;
-  }
+  const countryTexts=[a.country_code, a.country, info.display_name];
+  if(!paisResultadoValido(countryTexts,ctx)) return false;
+  const unitTexts=[a.state_code, (a['ISO3166-2-lvl4']||'').split('-').pop(), a.state, a.region, a.city, a.town, a.county, info.display_name].filter(Boolean);
+  if(!unidadeResultadoValida(unitTexts,ctx)) return false;
   return true;
 }
 function resultadoGoogleDentro(item, ctx){
   const comps=item.address_components||[];
-  if(ctx.codigoPais){
-    const c=comps.find(x=>(x.types||[]).includes('country'));
-    if(c && String(c.short_name||'').toUpperCase()!==ctx.codigoPais) return false;
+  const c=comps.find(x=>(x.types||[]).includes('country'));
+  if(!paisResultadoValido([c?.short_name,c?.long_name,item.formatted_address],ctx)) return false;
+  const unitTexts=[item.formatted_address];
+  for(const comp of comps){
+    const tipos=comp.types||[];
+    if(tipos.includes('administrative_area_level_1')||tipos.includes('administrative_area_level_2')||tipos.includes('locality')||tipos.includes('sublocality')||tipos.includes('postal_town')) unitTexts.push(comp.short_name, comp.long_name);
   }
-  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
-    const esperado=codigoUfBrasil(ctx.uf) || codigoUfBrasil(ctx.ufTexto);
-    const adm=comps.find(x=>(x.types||[]).includes('administrative_area_level_1'));
-    const encontrado=codigoUfBrasil(componenteTexto(adm));
-    if(esperado && encontrado && encontrado!==esperado) return false;
-    const textoEndereco=normalizarBuscaLocal([item.formatted_address, ...(comps||[]).map(componenteTexto)].filter(Boolean).join(' '));
-    if(esperado==='DF' && textoEndereco && !/(distrito federal|brasilia|brasília|taguatinga|df)/.test(textoEndereco)) return false;
-  }
+  if(!unidadeResultadoValida(unitTexts,ctx)) return false;
   return true;
 }
 function resultadoGoogleNovoDentro(item, ctx){
   const comps=item.addressComponents||item.address_components||[];
-  if(ctx.codigoPais){
-    const c=comps.find(x=>(x.types||[]).includes('country'));
-    const shortName=componenteTexto(c);
-    if(shortName && String(shortName).toUpperCase()!==ctx.codigoPais && normalizarBuscaLocal(shortName)!==normalizarBuscaLocal(ctx.pais)) return false;
+  const c=comps.find(x=>(x.types||[]).includes('country'));
+  if(!paisResultadoValido([componenteTexto(c), item.formattedAddress],ctx)) return false;
+  const unitTexts=[item.formattedAddress];
+  for(const comp of comps){
+    const tipos=comp.types||[];
+    if(tipos.includes('administrative_area_level_1')||tipos.includes('administrative_area_level_2')||tipos.includes('locality')||tipos.includes('sublocality')||tipos.includes('postal_town')) unitTexts.push(comp.shortText, comp.longText);
   }
-  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
-    const esperado=codigoUfBrasil(ctx.uf) || codigoUfBrasil(ctx.ufTexto);
-    const adm=comps.find(x=>(x.types||[]).includes('administrative_area_level_1'));
-    const encontrado=codigoUfBrasil(componenteTexto(adm));
-    if(esperado && encontrado && encontrado!==esperado) return false;
-    const textoEndereco=normalizarBuscaLocal([item.formattedAddress, ...(comps||[]).map(componenteTexto)].filter(Boolean).join(' '));
-    if(esperado==='DF' && textoEndereco && !/(distrito federal|brasilia|brasília|taguatinga|df)/.test(textoEndereco)) return false;
-  }
+  if(!unidadeResultadoValida(unitTexts,ctx)) return false;
   return true;
 }
 async function geocodeGooglePlacesNovo(query, ctx){
@@ -396,14 +452,7 @@ async function geocodeGooglePlacesNovo(query, ctx){
       if(!resultadoGoogleNovoDentro(item, ctx)) continue;
       const loc=item.location||{};
       if(Number.isFinite(Number(loc.latitude)) && Number.isFinite(Number(loc.longitude))){
-        return {
-          lat:Number(loc.latitude),
-          lon:Number(loc.longitude),
-          nome:item.displayName?.text||consulta,
-          endereco:item.formattedAddress||'',
-          provedor:'google_places_new',
-          consulta
-        };
+        return {lat:Number(loc.latitude),lon:Number(loc.longitude),nome:item.displayName?.text||consulta,endereco:item.formattedAddress||'',provedor:'google_places_new',consulta,pais_codigo:ctx.codigoPais||'',unidade_codigo:ctx.unidadeCodigo||''};
       }
     }
   }
@@ -418,7 +467,7 @@ async function geocodeGoogle(query, ctx){
   for(const consulta of variantes){
     const comps=[];
     if(ctx.codigoPais) comps.push('country:'+ctx.codigoPais);
-    if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional') comps.push('administrative_area:'+ctx.uf);
+    if(ctx.unidadeCodigo && ctx.uf && ctx.uf!=='Nacional') comps.push('administrative_area:'+(ctx.ufTexto || ctx.uf));
     const geocodeUrl='https://maps.googleapis.com/maps/api/geocode/json?address='+encodeURIComponent(consulta)+'&language=pt-BR'+(comps.length?'&components='+encodeURIComponent(comps.join('|')):'')+'&key='+encodeURIComponent(GOOGLE_MAPS_API_KEY);
     const gr=await fetch(geocodeUrl);
     if(gr.ok){
@@ -427,9 +476,7 @@ async function geocodeGoogle(query, ctx){
       for(const item of lista.slice(0,5)){
         if(!resultadoGoogleDentro(item, ctx)) continue;
         const loc=item.geometry?.location;
-        if(loc && Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lng))){
-          candidates.push({lat:Number(loc.lat),lon:Number(loc.lng),nome:item.formatted_address||consulta,endereco:item.formatted_address||'',provedor:'google_geocoding',consulta});
-        }
+        if(loc && Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lng))) candidates.push({lat:Number(loc.lat),lon:Number(loc.lng),nome:item.formatted_address||consulta,endereco:item.formatted_address||'',provedor:'google_geocoding',consulta,pais_codigo:ctx.codigoPais||'',unidade_codigo:ctx.unidadeCodigo||''});
       }
     }
     if(candidates.length) return candidates[0];
@@ -445,7 +492,7 @@ async function geocodeNominatim(query, ctx){
     if(!r.ok) continue;
     const lista=await r.json();
     const valido=(Array.isArray(lista)?lista:[]).find(item=>resultadoNominatimDentro(item,ctx));
-    if(valido) return {lat:Number(valido.lat),lon:Number(valido.lon),nome:valido.name||'',endereco:valido.display_name||'',provedor:'nominatim',consulta};
+    if(valido) return {lat:Number(valido.lat),lon:Number(valido.lon),nome:valido.name||'',endereco:valido.display_name||'',provedor:'nominatim',consulta,pais_codigo:ctx.codigoPais||'',unidade_codigo:ctx.unidadeCodigo||''};
   }
   return null;
 }
@@ -455,9 +502,13 @@ app.get('/geocode', async (req,res)=>{
     const query=limit(req.query.q,300);
     if(!query) return res.status(400).json({error:'Informe o nome ou endereço do local.'});
     const pais=limit(req.query.pais,80);
-    const uf=limit(req.query.uf,20);
+    const uf=limit(req.query.uf,40);
     const ufTexto=limit(req.query.ufTexto,120);
-    const ctx={pais,uf,ufTexto,codigoPais:codigoPaisMaps(pais)};
+    const codigoPaisInformado=limit(req.query.paisCodigo,10);
+    const codigoUnidadeInformado=limit(req.query.unidadeCodigo,20);
+    const codigoPais=(codigoPaisInformado || codigoPaisMaps(pais)).toUpperCase();
+    const unidadeCodigo=(codigoUnidadeInformado || codigoUnidadeLocal(codigoPais, uf, ufTexto)).toUpperCase();
+    const ctx={pais,uf,ufTexto,codigoPais,unidadeCodigo};
     let resultado=await geocodeNominatim(query,ctx);
     if(!resultado) resultado=await geocodeGoogle(query,ctx);
     if(!resultado){
@@ -470,7 +521,7 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v38-localizacao-google-fallback-economico'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v39-localizacao-internacional' }));
 
 
 const SERVICOS_COM_AGENDA = ['audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
@@ -540,8 +591,12 @@ app.post('/criar-evento', async (req,res)=>{
   if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais: text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais),
-      uf: (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf),
+  const paisEvento = text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais);
+  const ufEvento = (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf);
+  const paisCodigoEvento = limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisEvento),10);
+  const unidadeCodigoEvento = limit(b.unidade_codigo || b.unidadeCodigo || codigoUnidadeLocal(paisCodigoEvento, ufEvento, b.ufTexto),20);
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+      uf: ufEvento,
       origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
   ev.status_pagamento = await statusPagamentoInicial(ev);
@@ -883,7 +938,7 @@ app.get('/admin/agenda-pendencias', async (req,res)=>{
   const sb=getSupabase();
   const {data,error}=await sb
    .from('eventos')
-   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,status_pagamento,status_publicacao,status_operacao,created_at')
+   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,pais_codigo,unidade_codigo,cidade,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,status_pagamento,status_publicacao,status_operacao,created_at')
    .in('tipo_servico', SERVICOS_COM_AGENDA)
    .order('created_at',{ascending:false})
    .limit(300);
@@ -1185,7 +1240,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -1885,7 +1940,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf','local_evento','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf','pais_codigo','unidade_codigo','cidade','local_evento','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -1916,6 +1971,9 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
   if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
   if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
+  if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
+  if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
+  if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
   update.descricao_publicada = Object.prototype.hasOwnProperty.call(update,'descricao_original') ? update.descricao_original : (ev.descricao_publicada || ev.descricao_original);
   update.data_ultima_edicao = new Date().toISOString();
