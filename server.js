@@ -1211,7 +1211,13 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'valor_original',
       'cupom_codigo',
       'desconto_aplicado',
-      'valor_final'
+      'valor_final',
+      'local_evento',
+      'latitude',
+      'longitude',
+      'pais_codigo',
+      'unidade_codigo',
+      'cidade'
     ];
     const update = {};
     for (const key of allowed) {
@@ -1219,6 +1225,15 @@ app.patch('/admin/eventos/:id', async (req, res) => {
         update[key] = req.body[key];
       }
     }
+    if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,300);
+    if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
+    if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
+    if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
+    if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
+    if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
+    if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
+    if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
+
     update.editado_por_admin = true;
     update.data_ultima_edicao = new Date().toISOString();
 
