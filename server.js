@@ -32,6 +32,7 @@ const MERCADOPAGO_API_BASE = 'https://api.mercadopago.com';
 const MERCADOPAGO_VALOR_EVENTO = Number(process.env.MERCADOPAGO_VALOR_EVENTO || 10);
 const MERCADOPAGO_NOTIFICATION_URL = process.env.MERCADOPAGO_NOTIFICATION_URL || 'https://audesc-events-api.onrender.com/webhooks/mercadopago';
 const AUDESC_WEB_URL = process.env.AUDESC_WEB_URL || 'https://wm-acessibilidade.github.io/audesc-web';
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 
 function text(v){ return String(v || '').trim(); }
 function limit(v,n){ return text(v).slice(0,n); }
@@ -275,7 +276,173 @@ async function emailConfiavel(email){
 
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v37-precos-profissionais'}));
+
+function normalizarBuscaLocal(v){
+  return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+}
+function codigoPaisMaps(pais){
+  const mapa={'brasil':'BR','portugal':'PT','angola':'AO','mocambique':'MZ','moçambique':'MZ','cabo verde':'CV','guine-bissau':'GW','guiné-bissau':'GW','guine equatorial':'GQ','guiné equatorial':'GQ','sao tome e principe':'ST','são tomé e príncipe':'ST','timor-leste':'TL'};
+  return mapa[normalizarBuscaLocal(pais)] || '';
+}
+function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
+  const q=text(query);
+  const p=text(pais);
+  const u=text(ufTexto || uf);
+  const variantes=[];
+  function add(v){ v=text(v); if(v && !variantes.some(x=>normalizarBuscaLocal(x)===normalizarBuscaLocal(v))) variantes.push(v); }
+  if(u && p) add(`${q}, ${u}, ${p}`);
+  if(p) add(`${q}, ${p}`);
+  add(q);
+  const nq=normalizarBuscaLocal(q);
+  if(nq.includes('mpf')){
+    const expandida=q.replace(/\bmpf\b/ig,'Ministério Público Federal');
+    if(u && p) add(`${expandida}, ${u}, ${p}`);
+    if(p) add(`${expandida}, ${p}`);
+    add(expandida);
+    if(u && p) add(`Memorial do Ministério Público Federal, ${u}, ${p}`);
+    if(u && p) add(`Procuradoria-Geral da República, ${u}, ${p}`);
+  }
+  if(nq.includes('dorina') || nq.includes('biblioteca braille')){
+    if(u && p) add(`Biblioteca Braille Dorina Nowill, Taguatinga, ${u}, ${p}`);
+    if(p) add(`Biblioteca Braille Dorina Nowill, Taguatinga, ${p}`);
+  }
+  return variantes.slice(0,8);
+}
+function resultadoNominatimDentro(info, ctx){
+  const a=info.address||{};
+  if(ctx.codigoPais && String(a.country_code||'').toUpperCase()!==ctx.codigoPais) return false;
+  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
+    const cod=(a.state_code || (a['ISO3166-2-lvl4']||'').split('-').pop() || '').toUpperCase();
+    if(cod && cod!==String(ctx.uf).toUpperCase()) return false;
+    const estado=normalizarBuscaLocal(a.state || a.region || '');
+    const esperado=normalizarBuscaLocal(ctx.ufTexto);
+    if(!cod && esperado && estado && estado!==esperado) return false;
+  }
+  return true;
+}
+function resultadoGoogleDentro(item, ctx){
+  const comps=item.address_components||[];
+  if(ctx.codigoPais){
+    const c=comps.find(x=>(x.types||[]).includes('country'));
+    if(c && String(c.short_name||'').toUpperCase()!==ctx.codigoPais) return false;
+  }
+  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
+    const adm=comps.find(x=>(x.types||[]).includes('administrative_area_level_1'));
+    if(adm && adm.short_name && String(adm.short_name).toUpperCase()!==String(ctx.uf).toUpperCase()) return false;
+  }
+  return true;
+}
+function resultadoGoogleNovoDentro(item, ctx){
+  const comps=item.addressComponents||item.address_components||[];
+  if(ctx.codigoPais){
+    const c=comps.find(x=>(x.types||[]).includes('country'));
+    const shortName=c?.shortText || c?.short_name || '';
+    if(shortName && String(shortName).toUpperCase()!==ctx.codigoPais) return false;
+  }
+  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
+    const adm=comps.find(x=>(x.types||[]).includes('administrative_area_level_1'));
+    const shortName=adm?.shortText || adm?.short_name || '';
+    if(shortName && String(shortName).toUpperCase()!==String(ctx.uf).toUpperCase()) return false;
+  }
+  return true;
+}
+async function geocodeGooglePlacesNovo(query, ctx){
+  if(!GOOGLE_MAPS_API_KEY) return null;
+  const variantes=montarVariantesConsultaLocal(query, ctx.pais, ctx.uf, ctx.ufTexto);
+  for(const consulta of variantes){
+    const body={textQuery:consulta,languageCode:'pt-BR',maxResultCount:5};
+    if(ctx.codigoPais) body.regionCode=ctx.codigoPais;
+    const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
+        'X-Goog-FieldMask':'places.displayName,places.formattedAddress,places.location,places.addressComponents'
+      },
+      body:JSON.stringify(body)
+    });
+    if(!r.ok) continue;
+    const j=await r.json();
+    const lista=Array.isArray(j.places)?j.places:[];
+    for(const item of lista){
+      if(!resultadoGoogleNovoDentro(item, ctx)) continue;
+      const loc=item.location||{};
+      if(Number.isFinite(Number(loc.latitude)) && Number.isFinite(Number(loc.longitude))){
+        return {
+          lat:Number(loc.latitude),
+          lon:Number(loc.longitude),
+          nome:item.displayName?.text||consulta,
+          endereco:item.formattedAddress||'',
+          provedor:'google_places_new',
+          consulta
+        };
+      }
+    }
+  }
+  return null;
+}
+async function geocodeGoogle(query, ctx){
+  if(!GOOGLE_MAPS_API_KEY) return null;
+  const viaPlaces=await geocodeGooglePlacesNovo(query, ctx);
+  if(viaPlaces) return viaPlaces;
+  const variantes=montarVariantesConsultaLocal(query, ctx.pais, ctx.uf, ctx.ufTexto);
+  const candidates=[];
+  for(const consulta of variantes){
+    const comps=[];
+    if(ctx.codigoPais) comps.push('country:'+ctx.codigoPais);
+    if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional') comps.push('administrative_area:'+ctx.uf);
+    const geocodeUrl='https://maps.googleapis.com/maps/api/geocode/json?address='+encodeURIComponent(consulta)+'&language=pt-BR'+(comps.length?'&components='+encodeURIComponent(comps.join('|')):'')+'&key='+encodeURIComponent(GOOGLE_MAPS_API_KEY);
+    const gr=await fetch(geocodeUrl);
+    if(gr.ok){
+      const gj=await gr.json();
+      const lista=Array.isArray(gj.results)?gj.results:[];
+      for(const item of lista.slice(0,5)){
+        if(!resultadoGoogleDentro(item, ctx)) continue;
+        const loc=item.geometry?.location;
+        if(loc && Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lng))){
+          candidates.push({lat:Number(loc.lat),lon:Number(loc.lng),nome:item.formatted_address||consulta,endereco:item.formatted_address||'',provedor:'google_geocoding',consulta});
+        }
+      }
+    }
+    if(candidates.length) return candidates[0];
+  }
+  return null;
+}
+async function geocodeNominatim(query, ctx){
+  const variantes=montarVariantesConsultaLocal(query, ctx.pais, ctx.uf, ctx.ufTexto);
+  for(const consulta of variantes){
+    let url='https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=10&accept-language=pt-BR&q='+encodeURIComponent(consulta);
+    if(ctx.codigoPais) url+='&countrycodes='+encodeURIComponent(ctx.codigoPais.toLowerCase());
+    const r=await fetch(url, {headers:{'User-Agent':'Audesc/1.0'}});
+    if(!r.ok) continue;
+    const lista=await r.json();
+    const valido=(Array.isArray(lista)?lista:[]).find(item=>resultadoNominatimDentro(item,ctx));
+    if(valido) return {lat:Number(valido.lat),lon:Number(valido.lon),nome:valido.name||'',endereco:valido.display_name||'',provedor:'nominatim',consulta};
+  }
+  return null;
+}
+
+app.get('/geocode', async (req,res)=>{
+  try{
+    const query=limit(req.query.q,300);
+    if(!query) return res.status(400).json({error:'Informe o nome ou endereço do local.'});
+    const pais=limit(req.query.pais,80);
+    const uf=limit(req.query.uf,20);
+    const ufTexto=limit(req.query.ufTexto,120);
+    const ctx={pais,uf,ufTexto,codigoPais:codigoPaisMaps(pais)};
+    let resultado=await geocodeNominatim(query,ctx);
+    if(!resultado) resultado=await geocodeGoogle(query,ctx);
+    if(!resultado){
+      return res.status(404).json({error:'Local não encontrado na região selecionada. Tente informar também bairro, cidade ou endereço completo.'});
+    }
+    return res.json({ok:true,resultado});
+  }catch(e){
+    console.error('Erro no geocode:', e);
+    return res.status(500).json({error:'Erro ao buscar coordenadas do local.'});
+  }
+});
+
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v38-localizacao-google-fallback-economico'}));
 
 
 const SERVICOS_COM_AGENDA = ['audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
