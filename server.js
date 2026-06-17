@@ -284,6 +284,22 @@ function codigoPaisMaps(pais){
   const mapa={'brasil':'BR','portugal':'PT','angola':'AO','mocambique':'MZ','moçambique':'MZ','cabo verde':'CV','guine-bissau':'GW','guiné-bissau':'GW','guine equatorial':'GQ','guiné equatorial':'GQ','sao tome e principe':'ST','são tomé e príncipe':'ST','timor-leste':'TL'};
   return mapa[normalizarBuscaLocal(pais)] || '';
 }
+const UF_BRASIL = {
+  'ac':'AC','acre':'AC','al':'AL','alagoas':'AL','ap':'AP','amapa':'AP','amapá':'AP','am':'AM','amazonas':'AM','ba':'BA','bahia':'BA',
+  'ce':'CE','ceara':'CE','ceará':'CE','df':'DF','distrito federal':'DF','brasilia':'DF','brasília':'DF','es':'ES','espirito santo':'ES','espírito santo':'ES',
+  'go':'GO','goias':'GO','goiás':'GO','ma':'MA','maranhao':'MA','maranhão':'MA','mt':'MT','mato grosso':'MT','ms':'MS','mato grosso do sul':'MS',
+  'mg':'MG','minas gerais':'MG','pa':'PA','para':'PA','pará':'PA','pb':'PB','paraiba':'PB','paraíba':'PB','pr':'PR','parana':'PR','paraná':'PR',
+  'pe':'PE','pernambuco':'PE','pi':'PI','piaui':'PI','piauí':'PI','rj':'RJ','rio de janeiro':'RJ','rn':'RN','rio grande do norte':'RN',
+  'rs':'RS','rio grande do sul':'RS','ro':'RO','rondonia':'RO','rondônia':'RO','rr':'RR','roraima':'RR','sc':'SC','santa catarina':'SC',
+  'sp':'SP','sao paulo':'SP','são paulo':'SP','se':'SE','sergipe':'SE','to':'TO','tocantins':'TO'
+};
+function codigoUfBrasil(v){
+  const n=normalizarBuscaLocal(v);
+  return UF_BRASIL[n] || (String(v||'').trim().length===2 ? String(v).trim().toUpperCase() : '');
+}
+function componenteTexto(comp){
+  return comp?.shortText || comp?.longText || comp?.short_name || comp?.long_name || '';
+}
 function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
   const q=text(query);
   const p=text(pais);
@@ -300,23 +316,28 @@ function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
     if(p) add(`${expandida}, ${p}`);
     add(expandida);
     if(u && p) add(`Memorial do Ministério Público Federal, ${u}, ${p}`);
-    if(u && p) add(`Procuradoria-Geral da República, ${u}, ${p}`);
+    if(u && p) add(`Memorial do MPF, Brasília, ${u}, ${p}`);
+    if(u && p) add(`Memorial do Ministério Público Federal, Procuradoria-Geral da República, Brasília, ${u}, ${p}`);
+    if(u && p) add(`Procuradoria-Geral da República, SAF Sul Quadra 4, Brasília, ${u}, ${p}`);
+    if(u && p) add(`Ministério Público Federal, SAF Sul Quadra 4, Brasília, ${u}, ${p}`);
   }
   if(nq.includes('dorina') || nq.includes('biblioteca braille')){
     if(u && p) add(`Biblioteca Braille Dorina Nowill, Taguatinga, ${u}, ${p}`);
+    if(u && p) add(`Biblioteca Pública Braille Dorina Nowill, Taguatinga, ${u}, ${p}`);
+    if(u && p) add(`Biblioteca Dorina Nowill, Taguatinga, Brasília, ${u}, ${p}`);
     if(p) add(`Biblioteca Braille Dorina Nowill, Taguatinga, ${p}`);
   }
-  return variantes.slice(0,8);
+  return variantes.slice(0,14);
 }
 function resultadoNominatimDentro(info, ctx){
   const a=info.address||{};
   if(ctx.codigoPais && String(a.country_code||'').toUpperCase()!==ctx.codigoPais) return false;
   if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
-    const cod=(a.state_code || (a['ISO3166-2-lvl4']||'').split('-').pop() || '').toUpperCase();
-    if(cod && cod!==String(ctx.uf).toUpperCase()) return false;
-    const estado=normalizarBuscaLocal(a.state || a.region || '');
-    const esperado=normalizarBuscaLocal(ctx.ufTexto);
-    if(!cod && esperado && estado && estado!==esperado) return false;
+    const esperado=codigoUfBrasil(ctx.uf) || codigoUfBrasil(ctx.ufTexto);
+    const cod=codigoUfBrasil(a.state_code || (a['ISO3166-2-lvl4']||'').split('-').pop() || a.state || a.region || a.city || '');
+    if(esperado && cod && cod!==esperado) return false;
+    const endereco=normalizarBuscaLocal([a.state,a.region,a.city,a.town,a.county,info.display_name].filter(Boolean).join(' '));
+    if(esperado==='DF' && endereco && !/(distrito federal|brasilia|brasília|taguatinga)/.test(endereco)) return false;
   }
   return true;
 }
@@ -327,8 +348,12 @@ function resultadoGoogleDentro(item, ctx){
     if(c && String(c.short_name||'').toUpperCase()!==ctx.codigoPais) return false;
   }
   if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
+    const esperado=codigoUfBrasil(ctx.uf) || codigoUfBrasil(ctx.ufTexto);
     const adm=comps.find(x=>(x.types||[]).includes('administrative_area_level_1'));
-    if(adm && adm.short_name && String(adm.short_name).toUpperCase()!==String(ctx.uf).toUpperCase()) return false;
+    const encontrado=codigoUfBrasil(componenteTexto(adm));
+    if(esperado && encontrado && encontrado!==esperado) return false;
+    const textoEndereco=normalizarBuscaLocal([item.formatted_address, ...(comps||[]).map(componenteTexto)].filter(Boolean).join(' '));
+    if(esperado==='DF' && textoEndereco && !/(distrito federal|brasilia|brasília|taguatinga|df)/.test(textoEndereco)) return false;
   }
   return true;
 }
@@ -336,13 +361,16 @@ function resultadoGoogleNovoDentro(item, ctx){
   const comps=item.addressComponents||item.address_components||[];
   if(ctx.codigoPais){
     const c=comps.find(x=>(x.types||[]).includes('country'));
-    const shortName=c?.shortText || c?.short_name || '';
-    if(shortName && String(shortName).toUpperCase()!==ctx.codigoPais) return false;
+    const shortName=componenteTexto(c);
+    if(shortName && String(shortName).toUpperCase()!==ctx.codigoPais && normalizarBuscaLocal(shortName)!==normalizarBuscaLocal(ctx.pais)) return false;
   }
   if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
+    const esperado=codigoUfBrasil(ctx.uf) || codigoUfBrasil(ctx.ufTexto);
     const adm=comps.find(x=>(x.types||[]).includes('administrative_area_level_1'));
-    const shortName=adm?.shortText || adm?.short_name || '';
-    if(shortName && String(shortName).toUpperCase()!==String(ctx.uf).toUpperCase()) return false;
+    const encontrado=codigoUfBrasil(componenteTexto(adm));
+    if(esperado && encontrado && encontrado!==esperado) return false;
+    const textoEndereco=normalizarBuscaLocal([item.formattedAddress, ...(comps||[]).map(componenteTexto)].filter(Boolean).join(' '));
+    if(esperado==='DF' && textoEndereco && !/(distrito federal|brasilia|brasília|taguatinga|df)/.test(textoEndereco)) return false;
   }
   return true;
 }
