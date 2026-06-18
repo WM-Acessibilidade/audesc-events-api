@@ -663,7 +663,11 @@ app.post('/criar-evento', async (req,res)=>{
   ev.status_pagamento = await statusPagamentoInicial(ev);
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
-  res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data});
+  const email_publicacao_resultado = await notificarInscritosEventoPublicado({}, data).catch(err => {
+    console.error('Falha ao notificar inscritos no cadastro do evento:', err);
+    return {ok:false,error:String(err && err.message ? err.message : err)};
+  });
+  res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data,email_publicacao_resultado});
  }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao cadastrar evento.'}); }
 });
 
@@ -807,6 +811,214 @@ async function registrarResultadoEmail(eventoId, resultado){
   }catch(e){
     console.warn('Não foi possível registrar o resultado do e-mail. Verifique as colunas no Supabase:', e.message || e);
   }
+}
+
+
+async function enviarEmailResend({to, subject, text: textoEmail, html, tags}){
+  if(!RESEND_API_KEY) return { ok:false, skipped:true, reason:'RESEND_API_KEY ausente' };
+  const destinatarios = Array.isArray(to) ? to.filter(Boolean) : [to].filter(Boolean);
+  if(!destinatarios.length) return { ok:false, skipped:true, reason:'destinatário ausente' };
+  const response = await fetch('https://api.resend.com/emails', {
+    method:'POST',
+    headers:{
+      'Authorization':`Bearer ${RESEND_API_KEY}`,
+      'Content-Type':'application/json'
+    },
+    body:JSON.stringify({
+      from:RESEND_FROM_EMAIL,
+      to:destinatarios,
+      subject,
+      text: textoEmail,
+      html,
+      tags: Array.isArray(tags) ? tags : undefined
+    })
+  });
+  const body=await response.json().catch(()=>({}));
+  if(!response.ok) return { ok:false, status:response.status, error:body };
+  return { ok:true, response:body };
+}
+
+async function registrarEmailEnvio({tipo, evento_id, email_destino, destinatarios, assunto, mensagem, status='enviado', erro=null, response=null}){
+  try{
+    const destino = email_destino ? text(email_destino).toLowerCase() : null;
+    const listaDestinos = Array.isArray(destinatarios) ? destinatarios.map(e=>text(e).toLowerCase()).filter(Boolean) : (destino ? [destino] : []);
+    await getSupabase().from('email_envios').insert({
+      tipo: tipo || 'administrativo',
+      evento_id: evento_id || null,
+      email_destino: destino,
+      destinatarios: listaDestinos,
+      assunto: assunto || '',
+      mensagem: mensagem || '',
+      status,
+      erro: erro ? String(erro).slice(0,2000) : null,
+      response_id: response?.response?.id || response?.id || response?.response?.data?.id || null,
+      enviado_em:new Date().toISOString()
+    });
+  }catch(e){
+    console.warn('Não foi possível registrar envio de e-mail:', e.message || e);
+  }
+}
+
+async function envioJaRegistrado({tipo, evento_id, email_destino}){
+  try{
+    if(!tipo || !evento_id || !email_destino) return false;
+    const {data,error}=await getSupabase().from('email_envios')
+      .select('id')
+      .eq('tipo', tipo)
+      .eq('evento_id', evento_id)
+      .eq('email_destino', String(email_destino).toLowerCase())
+      .limit(1);
+    if(error) throw error;
+    return Array.isArray(data) && data.length > 0;
+  }catch(e){
+    console.warn('Não foi possível verificar histórico de e-mail:', e.message || e);
+    return false;
+  }
+}
+
+function urlPagamentoEvento(ev){
+  return `${AUDESC_WEB_URL.replace(/\/$/,'')}/pagamento.html?evento=${encodeURIComponent(ev.id)}`;
+}
+function urlEventoPublico(ev){
+  return `${AUDESC_WEB_URL.replace(/\/$/,'')}/evento.html?id=${encodeURIComponent(ev.id)}`;
+}
+function formatarMoeda(valor, moeda){
+  const currency = moeda || moedaDoEvento({pais: 'Brasil'});
+  try{return new Intl.NumberFormat('pt-BR',{style:'currency',currency}).format(Number(valor||0));}
+  catch{return `R$ ${Number(valor||0).toFixed(2)}`;}
+}
+function formatarDataEvento(ev){
+  if(!ev?.data_evento) return '';
+  try{return new Date(ev.data_evento).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'});}catch{return String(ev.data_evento);}
+}
+
+function montarEmailAgenda(ev, status){
+  const titulo = ev.titulo_publicado || ev.titulo_original || 'Evento Audesc';
+  const servico = nomeServico(ev.tipo_servico);
+  const obs = text(ev.observacao_agenda);
+  const valor = valorNumericoOuNull(ev.valor_final_agenda);
+  const moeda = ev.moeda_pagamento || moedaDoEvento(ev);
+  const disponivel = status === 'disponivel';
+  const subject = disponivel ? `Audesc: agenda disponível para ${titulo}` : `Audesc: atualização sobre sua solicitação`;
+  const linhas = [];
+  linhas.push('Olá!');
+  linhas.push('');
+  if(disponivel){
+    linhas.push('A disponibilidade de agenda para o serviço solicitado foi confirmada.');
+  }else{
+    linhas.push('No momento, não foi possível confirmar disponibilidade de agenda para o serviço solicitado.');
+  }
+  linhas.push('');
+  linhas.push(`Evento: ${titulo}`);
+  linhas.push(`Serviço: ${servico}`);
+  const dataEv=formatarDataEvento(ev); if(dataEv) linhas.push(`Data e horário: ${dataEv}`);
+  if(disponivel){
+    linhas.push(`Valor final: ${formatarMoeda(valor || 0, moeda)}`);
+    if((valor || 0) > 0) linhas.push(`Link para pagamento: ${urlPagamentoEvento(ev)}`);
+  }
+  if(obs) linhas.push(`Observação: ${obs}`);
+  linhas.push('');
+  linhas.push('Atenciosamente,');
+  linhas.push('Equipe Audesc');
+  const textEmail=linhas.join('\n');
+  const html=`<div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111;">
+    <h1>${disponivel?'Agenda disponível':'Atualização sobre a agenda'}</h1>
+    <p>Olá!</p>
+    <p>${disponivel?'A disponibilidade de agenda para o serviço solicitado foi confirmada.':'No momento, não foi possível confirmar disponibilidade de agenda para o serviço solicitado.'}</p>
+    <h2>Dados do evento</h2>
+    <p><strong>Evento:</strong> ${escapeEmailHtml(titulo)}</p>
+    <p><strong>Serviço:</strong> ${escapeEmailHtml(servico)}</p>
+    ${formatarDataEvento(ev)?`<p><strong>Data e horário:</strong> ${escapeEmailHtml(formatarDataEvento(ev))}</p>`:''}
+    ${disponivel?`<p><strong>Valor final:</strong> ${escapeEmailHtml(formatarMoeda(valor || 0, moeda))}</p>`:''}
+    ${disponivel && (valor || 0) > 0 ? `<p><a href="${escapeEmailHtml(urlPagamentoEvento(ev))}">Acessar pagamento</a></p>`:''}
+    ${obs?`<p><strong>Observação:</strong> ${escapeEmailHtml(obs)}</p>`:''}
+    <p>Atenciosamente,<br>Equipe Audesc</p>
+  </div>`;
+  return {subject,text:textEmail,html};
+}
+
+async function enviarNotificacaoAgendaSeNecessario(evAntes, evDepois){
+  const status = text(evDepois?.status_agenda);
+  if(!['disponivel','indisponivel'].includes(status)) return {ok:false, skipped:true, reason:'status sem envio'};
+  if(text(evAntes?.status_agenda) === status) return {ok:false, skipped:true, reason:'status não mudou'};
+  if(!evDepois.email_usuario) return {ok:false, skipped:true, reason:'email_usuario ausente'};
+  const tipo = status === 'disponivel' ? 'agenda_disponivel' : 'agenda_indisponivel';
+  if(await envioJaRegistrado({tipo, evento_id:evDepois.id, email_destino:evDepois.email_usuario})){
+    return {ok:false, skipped:true, reason:'envio já registrado'};
+  }
+  const conteudo = montarEmailAgenda(evDepois, status);
+  const result = await enviarEmailResend({to:evDepois.email_usuario, subject:conteudo.subject, text:conteudo.text, html:conteudo.html, tags:[{name:'tipo',value:tipo}]});
+  await registrarEmailEnvio({tipo, evento_id:evDepois.id, email_destino:evDepois.email_usuario, assunto:conteudo.subject, mensagem:conteudo.text, status:result.ok?'enviado':(result.skipped?'nao_enviado':'erro'), erro:result.ok?null:JSON.stringify(result), response:result});
+  return result;
+}
+
+function inscritoCompatívelComEvento(inscrito, ev){
+  if(!inscrito || !inscrito.email || inscrito.ativo !== true || inscrito.email_validado !== true) return false;
+  if(inscrito.receber_todos === true) return true;
+  const paisEvento = text(ev.pais_codigo || codigoPaisMaps(ev.pais)).toUpperCase();
+  const paisInscrito = text(inscrito.pais_codigo || codigoPaisMaps(inscrito.pais)).toUpperCase();
+  if(paisEvento && paisInscrito && paisEvento !== paisInscrito) return false;
+  const unidadeEvento = text(ev.unidade_codigo || codigoUnidadeLocal(paisEvento, ev.uf, ev.uf)).toUpperCase();
+  const unidadeInscrito = text(inscrito.unidade_codigo || codigoUnidadeLocal(paisInscrito, inscrito.uf, inscrito.uf)).toUpperCase();
+  if(unidadeEvento && unidadeInscrito && unidadeInscrito !== 'NACIONAL' && unidadeEvento !== unidadeInscrito) return false;
+  if(Array.isArray(inscrito.eventos_ids) && inscrito.eventos_ids.length){
+    return inscrito.eventos_ids.includes(ev.id);
+  }
+  return true;
+}
+
+function montarEmailEventoPublicado(ev){
+  const titulo = ev.titulo_publicado || ev.titulo_original || 'Evento acessível divulgado no Audesc';
+  const dataEv = formatarDataEvento(ev);
+  const local = ev.local_evento || [ev.cidade, ev.uf, ev.pais].filter(Boolean).join(', ');
+  const link = urlEventoPublico(ev);
+  const subject = `Novo evento no Audesc: ${titulo}`;
+  const textEmail = `Olá!\n\nUm novo evento foi publicado no Audesc para a região escolhida no seu cadastro.\n\nEvento: ${titulo}\n${dataEv?`Data e horário: ${dataEv}\n`:''}${local?`Local: ${local}\n`:''}\nAcessar evento: ${link}\n\nVocê recebeu esta mensagem porque cadastrou seu e-mail para receber notificações de eventos no Audesc.\n\nAtenciosamente,\nEquipe Audesc`;
+  const html = `<div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111;">
+    <h1>Novo evento no Audesc</h1>
+    <p>Olá!</p>
+    <p>Um novo evento foi publicado no Audesc para a região escolhida no seu cadastro.</p>
+    <h2>${escapeEmailHtml(titulo)}</h2>
+    ${dataEv?`<p><strong>Data e horário:</strong> ${escapeEmailHtml(dataEv)}</p>`:''}
+    ${local?`<p><strong>Local:</strong> ${escapeEmailHtml(local)}</p>`:''}
+    <p><a href="${escapeEmailHtml(link)}">Acessar evento</a></p>
+    <p>Você recebeu esta mensagem porque cadastrou seu e-mail para receber notificações de eventos no Audesc.</p>
+    <p>Atenciosamente,<br>Equipe Audesc</p>
+  </div>`;
+  return {subject,text:textEmail,html};
+}
+
+async function notificarInscritosEventoPublicado(evAntes, evDepois){
+  if(text(evDepois?.tipo_evento) !== 'publico') return {ok:false, skipped:true, reason:'evento privado'};
+  if(text(evDepois?.status_publicacao) !== 'aprovado') return {ok:false, skipped:true, reason:'evento não aprovado'};
+  if(text(evAntes?.status_publicacao) === 'aprovado') return {ok:false, skipped:true, reason:'evento já aprovado antes'};
+  const sb=getSupabase();
+  let inscritos=[];
+  try{
+    const {data,error}=await sb.from('notificacoes').select('*').eq('ativo',true).eq('email_validado',true).limit(2000);
+    if(error) throw error;
+    inscritos=(data||[]).filter(n=>inscritoCompatívelComEvento(n, evDepois));
+  }catch(e){
+    console.warn('Não foi possível consultar inscritos para notificação:', e.message || e);
+    return {ok:false,error:String(e.message||e)};
+  }
+  const conteudo=montarEmailEventoPublicado(evDepois);
+  const resultados=[];
+  for(const n of inscritos){
+    const email=text(n.email).toLowerCase();
+    if(!email) continue;
+    const tipo='evento_publicado';
+    if(await envioJaRegistrado({tipo, evento_id:evDepois.id, email_destino:email})) continue;
+    const result=await enviarEmailResend({to:email, subject:conteudo.subject, text:conteudo.text, html:conteudo.html, tags:[{name:'tipo',value:tipo}]});
+    await registrarEmailEnvio({tipo, evento_id:evDepois.id, email_destino:email, assunto:conteudo.subject, mensagem:conteudo.text, status:result.ok?'enviado':(result.skipped?'nao_enviado':'erro'), erro:result.ok?null:JSON.stringify(result), response:result});
+    if(result.ok){
+      try{
+        await sb.from('notificacoes').update({ultimo_envio_em:new Date().toISOString(), total_envios:Number(n.total_envios||0)+1}).eq('email', email);
+      }catch(e){ console.warn('Não foi possível atualizar contador da notificação:', e.message||e); }
+    }
+    resultados.push({email, ok:!!result.ok, status:result.status || null});
+  }
+  return {ok:true,total:resultados.length,resultados};
 }
 
 async function liberar(req,res){
@@ -1110,7 +1322,11 @@ app.patch('/admin/eventos/:id/agenda', async (req,res)=>{
    .select()
    .single();
   if(error) throw error;
-  res.json({ok:true,evento:data,valor_sugerido_agenda:calculo.valor_sugerido_agenda,valor_final_agenda:valorFinal});
+  const email_agenda_resultado = await enviarNotificacaoAgendaSeNecessario(ev, data).catch(err => {
+   console.error('Falha ao enviar e-mail de agenda:', err);
+   return {ok:false,error:String(err && err.message ? err.message : err)};
+  });
+  res.json({ok:true,evento:data,valor_sugerido_agenda:calculo.valor_sugerido_agenda,valor_final_agenda:valorFinal,email_agenda_resultado});
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message||'Erro ao atualizar agenda do evento.'});
@@ -1132,7 +1348,7 @@ app.get('/admin/emails', async (req,res)=>{
 
   const {data:notifs,error:notifsError}=await sb
    .from('notificacoes')
-   .select('email,ativo,email_validado,updated_at')
+   .select('email,ativo,email_validado,updated_at,ultimo_envio_em,total_envios,status')
    .not('email','is',null)
    .limit(1000);
   if(notifsError) throw notifsError;
@@ -1141,6 +1357,18 @@ app.get('/admin/emails', async (req,res)=>{
    .from('email_status')
    .select('*');
   if(statusError) throw statusError;
+
+  let enviosRows=[];
+  try{
+   const enviosResp=await sb
+    .from('email_envios')
+    .select('email_destino,destinatarios,tipo,enviado_em,status')
+    .order('enviado_em',{ascending:false})
+    .limit(3000);
+   if(!enviosResp.error && Array.isArray(enviosResp.data)) enviosRows=enviosResp.data;
+  }catch(e){
+   console.warn('Histórico de envios indisponível:', e.message||e);
+  }
 
   const mapa=new Map();
 
@@ -1157,7 +1385,11 @@ app.get('/admin/emails', async (req,res)=>{
      notificacoes_validadas:false,
      status:'comum',
      observacao:'',
-     atualizado_em:null
+     atualizado_em:null,
+     total_envios:0,
+     ultimo_envio:null,
+     ultimo_envio_tipo:'',
+     ultimo_envio_status:''
     });
    }
    return mapa.get(e);
@@ -1177,6 +1409,12 @@ app.get('/admin/emails', async (req,res)=>{
     item.origem_notificacoes=true;
     item.notificacoes_ativas = item.notificacoes_ativas || !!n.ativo;
     item.notificacoes_validadas = item.notificacoes_validadas || !!n.email_validado;
+    item.total_envios = Math.max(Number(item.total_envios||0), Number(n.total_envios||0));
+    if(n.ultimo_envio_em && (!item.ultimo_envio || new Date(n.ultimo_envio_em) > new Date(item.ultimo_envio))){
+     item.ultimo_envio=n.ultimo_envio_em;
+     item.ultimo_envio_tipo='notificação automática';
+     item.ultimo_envio_status=n.status || '';
+    }
    }
   }
 
@@ -1186,6 +1424,23 @@ app.get('/admin/emails', async (req,res)=>{
     item.status=s.status || 'comum';
     item.observacao=s.observacao || '';
     item.atualizado_em=s.atualizado_em || null;
+   }
+  }
+
+  for(const envio of enviosRows||[]){
+   const destinos=[];
+   if(envio.email_destino) destinos.push(envio.email_destino);
+   if(Array.isArray(envio.destinatarios)) destinos.push(...envio.destinatarios);
+   for(const raw of destinos){
+    const item=garantir(raw);
+    if(item){
+     item.total_envios++;
+     if(!item.ultimo_envio || (envio.enviado_em && new Date(envio.enviado_em) > new Date(item.ultimo_envio))){
+      item.ultimo_envio=envio.enviado_em || null;
+      item.ultimo_envio_tipo=envio.tipo || '';
+      item.ultimo_envio_status=envio.status || '';
+     }
+    }
    }
   }
 
@@ -1389,7 +1644,15 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     update.editado_por_admin = true;
     update.data_ultima_edicao = new Date().toISOString();
 
-    const { data, error } = await getSupabase()
+    const sbAdminPatch = getSupabase();
+    const { data: eventoAntes, error: eventoAntesError } = await sbAdminPatch
+      .from('eventos')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (eventoAntesError) throw eventoAntesError;
+
+    const { data, error } = await sbAdminPatch
       .from('eventos')
       .update(update)
       .eq('id', req.params.id)
@@ -1397,7 +1660,15 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       .single();
 
     if (error) throw error;
-    res.json({ ok: true, evento: data });
+    const email_agenda_resultado = await enviarNotificacaoAgendaSeNecessario(eventoAntes, data).catch(err => {
+      console.error('Falha ao enviar e-mail de agenda pelo painel:', err);
+      return {ok:false,error:String(err && err.message ? err.message : err)};
+    });
+    const email_publicacao_resultado = await notificarInscritosEventoPublicado(eventoAntes, data).catch(err => {
+      console.error('Falha ao notificar inscritos sobre evento publicado:', err);
+      return {ok:false,error:String(err && err.message ? err.message : err)};
+    });
+    res.json({ ok: true, evento: data, email_agenda_resultado, email_publicacao_resultado });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'Erro ao atualizar evento.' });
@@ -1420,7 +1691,11 @@ app.post('/notificacoes/solicitar', async (req,res)=>{
   const email=text(b.email).toLowerCase();
   if(!email || !email.includes('@')) return res.status(400).json({error:'Informe um e-mail válido.'});
   if(await emailBloqueado(email)) return res.status(403).json({error:'Este e-mail está bloqueado para cadastro de notificações.'});
-  const payload={email,receber_todos:!!b.receber_todos,pais:text(b.pais),uf:text(b.uf),eventos_ids:Array.isArray(b.eventos_ids)?b.eventos_ids:[],updated_at:new Date().toISOString()};
+  const paisNotificacao=text(b.pais);
+  const ufNotificacao=text(b.uf);
+  const paisCodigoNotificacao=limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisNotificacao),10);
+  const unidadeCodigoNotificacao=limit(b.unidade_codigo || b.unidadeCodigo || codigoUnidadeLocal(paisCodigoNotificacao, ufNotificacao, b.ufTexto),20);
+  const payload={email,receber_todos:!!b.receber_todos,pais:paisNotificacao,uf:ufNotificacao,pais_codigo:paisCodigoNotificacao,unidade_codigo:unidadeCodigoNotificacao,eventos_ids:Array.isArray(b.eventos_ids)?b.eventos_ids:[],updated_at:new Date().toISOString()};
   const sb=getSupabase();
   const {data:existing,error:findError}=await sb.from('notificacoes').select('*').eq('email',email).maybeSingle();
   if(findError) throw findError;
