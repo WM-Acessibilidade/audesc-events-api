@@ -977,8 +977,50 @@ app.get('/pagamentos/calcular/:id', async (req,res)=>{
 app.get('/admin/precificacao-servicos', async (req,res)=>{
  try{
   if(!admin(req,res)) return;
-  const {data,error}=await getSupabase().from('precificacao_servicos').select('*').order('tipo_servico',{ascending:true}).order('moeda',{ascending:true});
+  const sb=getSupabase();
+  let {data,error}=await sb.from('precificacao_servicos').select('*').order('tipo_servico',{ascending:true}).order('moeda',{ascending:true});
   if(error) throw error;
+
+  // Garante que a página de precificação sempre tenha campos para todos os serviços ativos.
+  // Isso evita que novos serviços centralizados em data/servicos.json fiquem invisíveis até uma inserção manual no banco.
+  const existentes = new Set((data||[]).map(p => String(p.tipo_servico||'') + '|' + String(p.moeda||'')));
+  let moedas = [...new Set((data||[]).map(p => p.moeda).filter(Boolean))];
+  let precificacaoBase = [];
+  try{
+    const baseResp = await sb.from('precificacao').select('*').order('moeda',{ascending:true});
+    if(!baseResp.error && Array.isArray(baseResp.data)) precificacaoBase = baseResp.data;
+  }catch(_e){}
+  if(!moedas.length) moedas = [...new Set(precificacaoBase.map(p => p.moeda).filter(Boolean))];
+  if(!moedas.length) moedas = ['BRL','EUR','USD'];
+  const basePorMoeda = new Map(precificacaoBase.map(p => [p.moeda, p]));
+
+  const defaults = [];
+  for(const servico of SERVICOS_CONFIG.filter(s => s.ativo !== false)){
+    for(const moeda of moedas){
+      const key = servico.codigo + '|' + moeda;
+      if(existentes.has(key)) continue;
+      const base = basePorMoeda.get(moeda) || {};
+      const usaPacote = !!servico.usaTransmissao && !servico.somenteProfissional && !servico.somenteDivulgacao;
+      defaults.push({
+        tipo_servico: servico.codigo,
+        moeda,
+        valor_hora: 0,
+        valor_base_10_ouvintes_1_hora: usaPacote ? Number(base.valor_base_10_ouvintes_1_hora || 0) : 0,
+        acrescimo_por_10_ouvintes: usaPacote ? Number(base.acrescimo_por_10_ouvintes || 0) : 0,
+        ouvintes_minimos: usaPacote ? Number(base.ouvintes_minimos || 10) : 10,
+        duracao_minima_horas: usaPacote ? Number(base.duracao_minima_horas || 1) : 1,
+        atualizado_em: new Date().toISOString()
+      });
+    }
+  }
+  if(defaults.length){
+    const ins = await sb.from('precificacao_servicos').insert(defaults).select('*');
+    if(ins.error) console.warn('Não foi possível criar precificações faltantes:', ins.error.message || ins.error);
+    else data = [...(data||[]), ...(ins.data||[])];
+  }
+
+  const ordemServico = new Map(SERVICOS_CONFIG.map(s => [s.codigo, Number(s.ordem || 999)]));
+  data = (data||[]).sort((a,b)=>(ordemServico.get(a.tipo_servico)||999)-(ordemServico.get(b.tipo_servico)||999) || String(a.moeda).localeCompare(String(b.moeda)));
   res.json({ok:true,precificacao:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao carregar precificação dos serviços.'});}
 });
