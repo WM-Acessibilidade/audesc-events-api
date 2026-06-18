@@ -1,0 +1,50 @@
+{
+  "countries": [
+    {
+      "name": "Brasil",
+      "code": "BR",
+      "unitLabel": "Unidade federativa"
+    },
+    {
+      "name": "Angola",
+      "code": "AO",
+      "unitLabel": "Província"
+    },
+    {
+      "name": "Cabo Verde",
+      "code": "CV",
+      "unitLabel": "Ilha"
+    },
+    {
+      "name": "Guiné-Bissau",
+      "code": "GW",
+      "unitLabel": "Região"
+    },
+    {
+      "name": "Guiné Equatorial",
+      "code": "GQ",
+      "unitLabel": "Província"
+    },
+    {
+      "name": "Moçambique",
+      "code": "MZ",
+      "unitLabel": "Província"
+    },
+    {
+      "name": "Portugal",
+      "code": "PT",
+      "unitLabel": "Distrito ou região autônoma"
+    },
+    {
+      "name": "São Tomé e Príncipe",
+      "code": "ST",
+      "unitLabel": "Distrito ou região autônoma"
+    },
+    {
+      "name": "Timor-Leste",
+      "code": "TL",
+      "unitLabel": "Município ou região administrativa especial"
+    }
+  ],
+  "note": "Arquivo de referência para expansão internacional. A validação geográfica do backend usa data/location-aliases.json; o frontend usa data/paises-unidades.js. Mantenha os três alinhados ao incluir novos países."
+}
