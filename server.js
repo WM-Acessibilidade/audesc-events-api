@@ -65,6 +65,105 @@ function servicoSomenteDivulgacao(codigo){ return !!servicoConfig(codigo)?.somen
 function servicoSomenteProfissional(codigo){ return !!servicoConfig(codigo)?.somenteProfissional; }
 function servicoUsaTransmissao(codigo){ return !!servicoConfig(codigo)?.usaTransmissao; }
 
+function defaultFormularioConfig(){
+  const codigos = listarTiposServicoValidos();
+  const basicos = codigos.filter(c => c === 'audesc_transmissao' || c === 'divulgacao_gratuita');
+  const todos = codigos.slice();
+  return {
+    versao: 1,
+    atualizado_em: null,
+    padrao: {
+      servicosDisponiveis: basicos.length ? basicos : todos,
+      campos: {
+        descricao_original: { visivel: true, obrigatorio: false },
+        tipo_evento: { visivel: true, obrigatorio: true },
+        divulgar_acesso_ouvintes: { visivel: true, obrigatorio: false },
+        data_evento: { visivel: true, obrigatorio: false },
+        duracao_horas: { visivel: true, obrigatorio: true },
+        max_ouvintes: { visivel: true, obrigatorio: true },
+        local_evento: { visivel: true, obrigatorio: false },
+        latitude: { visivel: true, obrigatorio: false },
+        longitude: { visivel: true, obrigatorio: false },
+        site_oficial: { visivel: true, obrigatorio: false },
+        link_ingressos: { visivel: true, obrigatorio: false },
+        link_programacao: { visivel: true, obrigatorio: false },
+        link_acessibilidade: { visivel: true, obrigatorio: false }
+      }
+    },
+    regras: [
+      {
+        pais_codigo: 'BR',
+        unidade_codigo: 'DF',
+        nome: 'Brasil - Distrito Federal',
+        servicosDisponiveis: todos,
+        campos: {}
+      }
+    ]
+  };
+}
+function sanitizarFormularioConfig(input){
+  const base = defaultFormularioConfig();
+  const cfg = input && typeof input === 'object' ? input : {};
+  const validos = new Set(listarTiposServicoValidos());
+  function limpaServicos(arr, fallback){
+    const list = Array.isArray(arr) ? arr : fallback;
+    return [...new Set((list || []).filter(c => validos.has(c)))];
+  }
+  function limpaCampo(v, def={visivel:true, obrigatorio:false}){
+    const obj = v && typeof v === 'object' ? v : {};
+    return { visivel: obj.visivel !== false, obrigatorio: !!obj.obrigatorio };
+  }
+  const camposBase = Object.assign({}, base.padrao.campos, cfg.padrao?.campos || {});
+  const campos = {};
+  for(const k of Object.keys(base.padrao.campos)) campos[k] = limpaCampo(camposBase[k], base.padrao.campos[k]);
+  const regras = Array.isArray(cfg.regras) ? cfg.regras.map(r => {
+    const pais = limit(r.pais_codigo || r.paisCodigo || '', 8).toUpperCase();
+    const unidade = limit(r.unidade_codigo || r.unidadeCodigo || '', 30).toUpperCase();
+    if(!pais || !unidade) return null;
+    const camposRegra = {};
+    const rc = r.campos && typeof r.campos === 'object' ? r.campos : {};
+    for(const k of Object.keys(base.padrao.campos)){
+      if(Object.prototype.hasOwnProperty.call(rc,k)) camposRegra[k] = limpaCampo(rc[k], campos[k]);
+    }
+    return {
+      pais_codigo: pais,
+      unidade_codigo: unidade,
+      nome: limit(r.nome || '', 160),
+      servicosDisponiveis: limpaServicos(r.servicosDisponiveis, base.padrao.servicosDisponiveis),
+      campos: camposRegra
+    };
+  }).filter(Boolean) : base.regras;
+  return {
+    versao: 1,
+    atualizado_em: new Date().toISOString(),
+    padrao: { servicosDisponiveis: limpaServicos(cfg.padrao?.servicosDisponiveis, base.padrao.servicosDisponiveis), campos },
+    regras
+  };
+}
+async function obterFormularioConfig(){
+  const fallback = defaultFormularioConfig();
+  try{
+    const {data,error} = await getSupabase().from('formulario_config').select('config').eq('id','default').maybeSingle();
+    if(error) throw error;
+    if(data?.config) return sanitizarFormularioConfig(data.config);
+  }catch(e){
+    console.warn('Usando configuração padrão do formulário:', e.message || e);
+  }
+  return fallback;
+}
+function resolverFormularioConfigParaLocal(config, paisCodigo, unidadeCodigo){
+  const cfg = sanitizarFormularioConfig(config);
+  const pais = String(paisCodigo || '').toUpperCase();
+  const unidade = String(unidadeCodigo || '').toUpperCase();
+  const regra = cfg.regras.find(r => r.pais_codigo === pais && r.unidade_codigo === unidade);
+  const campos = Object.assign({}, cfg.padrao.campos, regra?.campos || {});
+  return {
+    servicosDisponiveis: regra?.servicosDisponiveis?.length ? regra.servicosDisponiveis : cfg.padrao.servicosDisponiveis,
+    campos
+  };
+}
+
+
 
 function text(v){ return String(v || '').trim(); }
 function limit(v,n){ return text(v).slice(0,n); }
@@ -656,6 +755,11 @@ app.post('/criar-evento', async (req,res)=>{
   const ufEvento = (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf);
   const paisCodigoEvento = limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisEvento),10);
   const unidadeCodigoEvento = limit(b.unidade_codigo || b.unidadeCodigo || codigoUnidadeLocal(paisCodigoEvento, ufEvento, b.ufTexto),20);
+  const formularioCfg = await obterFormularioConfig();
+  const localCfg = resolverFormularioConfigParaLocal(formularioCfg, paisCodigoEvento, unidadeCodigoEvento);
+  if(Array.isArray(localCfg.servicosDisponiveis) && !localCfg.servicosDisponiveis.includes(tipo_servico)){
+    return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
+  }
   const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
@@ -1059,6 +1163,38 @@ app.post('/liberar-evento/:id',liberar);
 app.get('/liberar-evento/:id',liberar);
 
 
+
+
+app.get('/formulario-config', async (req,res)=>{
+  try{
+    const cfg = await obterFormularioConfig();
+    res.json({ok:true,config:cfg,servicos:SERVICOS_CONFIG});
+  }catch(e){
+    res.status(500).json({error:e.message || 'Erro ao carregar configuração do formulário.'});
+  }
+});
+
+app.get('/admin/formulario-config', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const cfg = await obterFormularioConfig();
+    res.json({ok:true,config:cfg,servicos:SERVICOS_CONFIG});
+  }catch(e){
+    res.status(500).json({error:e.message || 'Erro ao carregar configuração do formulário.'});
+  }
+});
+
+app.patch('/admin/formulario-config', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const cfg = sanitizarFormularioConfig(req.body?.config || req.body || {});
+    const {data,error} = await getSupabase().from('formulario_config').upsert({id:'default',config:cfg,updated_at:new Date().toISOString()},{onConflict:'id'}).select().single();
+    if(error) throw error;
+    res.json({ok:true,config:data.config});
+  }catch(e){
+    res.status(500).json({error:e.message || 'Erro ao salvar configuração do formulário.'});
+  }
+});
 
 app.get('/admin/precificacao', async (req,res)=>{
  try{
