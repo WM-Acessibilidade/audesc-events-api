@@ -170,6 +170,36 @@ async function calcularValorBaseServico(ev, moeda){
  return null;
 }
 
+
+function valorNumericoOuNull(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? arredondarValor(n) : null;
+}
+
+async function calcularValorSugeridoAgenda(ev){
+  const moeda = moedaDoEvento(ev);
+  const pacote = await calcularValorBaseServico(ev, moeda);
+  if(!pacote) return { moeda, valor_sugerido_agenda: 0, pacote: null };
+  return { moeda, valor_sugerido_agenda: arredondarValor(pacote.valor_original), pacote };
+}
+
+function aplicarValorFinalAgendaSeExistir(ev, pacote){
+  if(!requerAgendaProfissional(ev)) return pacote;
+  const valorFinalAgenda = valorNumericoOuNull(ev.valor_final_agenda);
+  if(valorFinalAgenda === null) return pacote;
+  return Object.assign({}, pacote, {
+    valor_original: valorFinalAgenda,
+    valor_final_agenda: valorFinalAgenda,
+    valor_sugerido_agenda: valorNumericoOuNull(ev.valor_sugerido_agenda),
+    detalhes: Object.assign({}, pacote.detalhes || {}, {
+      valor_sugerido_agenda: valorNumericoOuNull(ev.valor_sugerido_agenda),
+      valor_final_definido_pelo_admin: valorFinalAgenda,
+      valor_base_original_calculado: pacote.valor_original
+    })
+  });
+}
+
 async function calcularPagamentoEvento(ev, codigoCupom){
   const moeda = moedaDoEvento(ev);
   const servicoCalculado = await calcularValorBaseServico(ev, moeda);
@@ -180,6 +210,7 @@ async function calcularPagamentoEvento(ev, codigoCupom){
     const precificacao = await obterPrecificacao(moeda, ev.tipo_servico);
     pacote = calcularValorPacote(ev, precificacao);
   }
+  pacote = aplicarValorFinalAgendaSeExistir(ev, pacote);
 
   let cupom = null;
   let desconto = 0;
@@ -521,7 +552,7 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v39-localizacao-internacional' }));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v40-agenda-valor-final' }));
 
 
 const SERVICOS_COM_AGENDA = ['audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
@@ -938,7 +969,7 @@ app.get('/admin/agenda-pendencias', async (req,res)=>{
   const sb=getSupabase();
   const {data,error}=await sb
    .from('eventos')
-   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,pais_codigo,unidade_codigo,cidade,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,status_pagamento,status_publicacao,status_operacao,created_at')
+   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,pais_codigo,unidade_codigo,cidade,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,valor_sugerido_agenda,valor_final_agenda,valor_agenda_definido_por_admin,status_pagamento,status_publicacao,status_operacao,created_at')
    .in('tipo_servico', SERVICOS_COM_AGENDA)
    .order('created_at',{ascending:false})
    .limit(300);
@@ -951,6 +982,27 @@ app.get('/admin/agenda-pendencias', async (req,res)=>{
  }
 });
 
+app.get('/admin/eventos/:id/valor-agenda', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const {data:ev,error}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).single();
+  if(error) throw error;
+  if(!requerAgendaProfissional(ev)) return res.status(400).json({error:'Este serviço não depende de agenda de profissional.'});
+  const calculo=await calcularValorSugeridoAgenda(ev);
+  const valorFinal=valorNumericoOuNull(ev.valor_final_agenda);
+  res.json({
+   ok:true,
+   moeda:calculo.moeda,
+   valor_sugerido_agenda:calculo.valor_sugerido_agenda,
+   valor_final_agenda:valorFinal === null ? calculo.valor_sugerido_agenda : valorFinal,
+   pacote:calculo.pacote
+  });
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao calcular valor de agenda.'});
+ }
+});
+
 app.patch('/admin/eventos/:id/agenda', async (req,res)=>{
  try{
   if(!admin(req,res)) return;
@@ -958,13 +1010,27 @@ app.patch('/admin/eventos/:id/agenda', async (req,res)=>{
   if(!['pendente','disponivel','indisponivel'].includes(status)){
    return res.status(400).json({error:'Status de agenda inválido.'});
   }
+  const {data:ev,error:evError}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).single();
+  if(evError) throw evError;
+  if(!requerAgendaProfissional(ev)) return res.status(400).json({error:'Este serviço não depende de agenda de profissional.'});
+
+  const calculo=await calcularValorSugeridoAgenda(ev);
+  let valorFinal=valorNumericoOuNull(req.body?.valor_final_agenda);
+  if(valorFinal === null) valorFinal = valorNumericoOuNull(ev.valor_final_agenda);
+  if(valorFinal === null) valorFinal = calculo.valor_sugerido_agenda;
+
   const update={
    status_agenda:status,
    observacao_agenda:text(req.body?.observacao_agenda || req.body?.observacao),
+   valor_sugerido_agenda:calculo.valor_sugerido_agenda,
+   valor_final_agenda:valorFinal,
+   valor_agenda_definido_por_admin: status === 'disponivel',
    agenda_atualizado_em:new Date().toISOString(),
    data_ultima_edicao:new Date().toISOString()
   };
-  if(status === 'disponivel') update.status_pagamento='pendente';
+  if(status === 'disponivel') update.status_pagamento = valorFinal > 0 ? 'pendente' : 'dispensado';
+  if(status === 'indisponivel') update.status_pagamento = 'cancelado';
+  if(status === 'pendente') update.status_pagamento = 'pendente';
   const {data,error}=await getSupabase()
    .from('eventos')
    .update(update)
@@ -972,7 +1038,7 @@ app.patch('/admin/eventos/:id/agenda', async (req,res)=>{
    .select()
    .single();
   if(error) throw error;
-  res.json({ok:true,evento:data});
+  res.json({ok:true,evento:data,valor_sugerido_agenda:calculo.valor_sugerido_agenda,valor_final_agenda:valorFinal});
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message||'Erro ao atualizar agenda do evento.'});
@@ -1212,6 +1278,9 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'cupom_codigo',
       'desconto_aplicado',
       'valor_final',
+      'valor_sugerido_agenda',
+      'valor_final_agenda',
+      'valor_agenda_definido_por_admin',
       'local_evento',
       'latitude',
       'longitude',
@@ -1228,11 +1297,22 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,300);
     if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
     if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
+    if(Object.prototype.hasOwnProperty.call(update,'valor_sugerido_agenda')) update.valor_sugerido_agenda = valorNumericoOuNull(update.valor_sugerido_agenda);
+    if(Object.prototype.hasOwnProperty.call(update,'valor_final_agenda')) update.valor_final_agenda = valorNumericoOuNull(update.valor_final_agenda);
+    if(Object.prototype.hasOwnProperty.call(update,'valor_agenda_definido_por_admin')) update.valor_agenda_definido_por_admin = !!update.valor_agenda_definido_por_admin;
     if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
     if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
     if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
     if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
     if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
+
+    if(Object.prototype.hasOwnProperty.call(update,'status_agenda') && ['disponivel','indisponivel','pendente'].includes(text(update.status_agenda))){
+      if(text(update.status_agenda) === 'disponivel'){
+        const finalAgenda = valorNumericoOuNull(update.valor_final_agenda);
+        if(finalAgenda !== null) update.status_pagamento = finalAgenda > 0 ? 'pendente' : 'dispensado';
+      }
+      if(text(update.status_agenda) === 'indisponivel') update.status_pagamento = 'cancelado';
+    }
 
     update.editado_por_admin = true;
     update.data_ultima_edicao = new Date().toISOString();
