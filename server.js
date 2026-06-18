@@ -35,6 +35,36 @@ const MERCADOPAGO_VALOR_EVENTO = Number(process.env.MERCADOPAGO_VALOR_EVENTO || 
 const MERCADOPAGO_NOTIFICATION_URL = process.env.MERCADOPAGO_NOTIFICATION_URL || 'https://audesc-events-api.onrender.com/webhooks/mercadopago';
 const AUDESC_WEB_URL = process.env.AUDESC_WEB_URL || 'https://wm-acessibilidade.github.io/audesc-web';
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
+function carregarServicosConfig(){
+  const padrao = [
+    {codigo:'audesc_transmissao',nome:'Transmissão Audesc (transmissor e receptores)',ativo:true,requerAgenda:false,usaTransmissao:true,somenteDivulgacao:false,somenteProfissional:false,permiteValorManual:false},
+    {codigo:'divulgacao_gratuita',nome:'Somente divulgação no Audesc',ativo:true,requerAgenda:false,usaTransmissao:false,somenteDivulgacao:true,somenteProfissional:false,permiteValorManual:false},
+    {codigo:'audesc_com_audiodescritor',nome:'Serviço completo - Audesc + audiodescritor',ativo:true,requerAgenda:true,usaTransmissao:true,somenteDivulgacao:false,somenteProfissional:false,permiteValorManual:true},
+    {codigo:'somente_audiodescritor',nome:'Audiodescritor',ativo:true,requerAgenda:true,usaTransmissao:false,somenteDivulgacao:false,somenteProfissional:true,permiteValorManual:true},
+    {codigo:'somente_consultor',nome:'Consultor',ativo:true,requerAgenda:true,usaTransmissao:false,somenteDivulgacao:false,somenteProfissional:true,permiteValorManual:true}
+  ];
+  try{
+    const file = path.join(__dirname, 'data', 'servicos.json');
+    if(fs.existsSync(file)){
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if(Array.isArray(data) && data.length) return data;
+    }
+  }catch(e){
+    console.warn('Não foi possível carregar data/servicos.json. Usando configuração padrão.', e.message || e);
+  }
+  return padrao;
+}
+const SERVICOS_CONFIG = carregarServicosConfig();
+const SERVICOS_MAP = new Map(SERVICOS_CONFIG.map(s => [s.codigo, s]));
+function servicoConfig(codigo){ return SERVICOS_MAP.get(String(codigo || '').trim()) || null; }
+function nomeServico(codigo){ return servicoConfig(codigo)?.nome || codigo || '—'; }
+function servicoAtivo(codigo){ const s=servicoConfig(codigo); return !!s && s.ativo !== false; }
+function listarTiposServicoValidos(){ return SERVICOS_CONFIG.filter(s => s.ativo !== false).map(s => s.codigo); }
+function servicoRequerAgenda(codigo){ return !!servicoConfig(codigo)?.requerAgenda; }
+function servicoSomenteDivulgacao(codigo){ return !!servicoConfig(codigo)?.somenteDivulgacao; }
+function servicoSomenteProfissional(codigo){ return !!servicoConfig(codigo)?.somenteProfissional; }
+function servicoUsaTransmissao(codigo){ return !!servicoConfig(codigo)?.usaTransmissao; }
+
 
 function text(v){ return String(v || '').trim(); }
 function limit(v,n){ return text(v).slice(0,n); }
@@ -149,15 +179,15 @@ async function calcularValorBaseServico(ev, moeda){
  const tipo=text(ev.tipo_servico)||'audesc_transmissao';
  const duracao=Math.max(1,Number(ev.duracao_horas||1));
  const ouvintes=Math.max(10,Number(ev.max_ouvintes||10));
- if(tipo==='divulgacao_gratuita'){
+ if(servicoSomenteDivulgacao(tipo)){
   const preco=await obterPrecoServico(tipo,moeda);
   const valorServico=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
-  return {valor_original:arredondarValor(valorServico),ouvintes:null,duracao_horas:1,tipo_servico:tipo,detalhes:{descricao:'Divulgação no Audesc',valor_servico:valorServico}};
+  return {valor_original:arredondarValor(valorServico),ouvintes:null,duracao_horas:1,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_servico:valorServico}};
  }
- if(tipo==='somente_audiodescritor'||tipo==='somente_consultor'){
+ if(servicoSomenteProfissional(tipo)){
   const preco=await obterPrecoServico(tipo,moeda);
   const valorHora=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
-  return {valor_original:arredondarValor(valorHora*duracao),ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:tipo==='somente_audiodescritor'?'Somente audiodescritor':'Somente consultor',valor_hora:valorHora}};
+  return {valor_original:arredondarValor(valorHora*duracao),ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_hora:valorHora}};
  }
  if(tipo==='audesc_com_audiodescritor'){
   const pAud=await obterPrecificacao(moeda,'audesc_transmissao');
@@ -165,7 +195,7 @@ async function calcularValorBaseServico(ev, moeda){
   const pAd=await obterPrecoServico('somente_audiodescritor',moeda);
   const valorHoraAd=pAd?numeroSeguro(pAd.valor_hora,pAd.valor_base_10_ouvintes_1_hora):0;
   const valorAd=arredondarValor(valorHoraAd*duracao);
-  return {valor_original:arredondarValor(pacoteAud.valor_original+valorAd),ouvintes:pacoteAud.ouvintes,duracao_horas:pacoteAud.duracao_horas,tipo_servico:tipo,detalhes:{descricao:'Serviço completo - Audesc + audiodescritor',valor_audesc:pacoteAud.valor_original,valor_audiodescritor:valorAd,valor_hora_audiodescritor:valorHoraAd}};
+  return {valor_original:arredondarValor(pacoteAud.valor_original+valorAd),ouvintes:pacoteAud.ouvintes,duracao_horas:pacoteAud.duracao_horas,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_audesc:pacoteAud.valor_original,valor_audiodescritor:valorAd,valor_hora_audiodescritor:valorHoraAd}};
  }
  return null;
 }
@@ -552,12 +582,12 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v40-agenda-valor-final' }));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v41-servicos-centralizados' }));
 
 
-const SERVICOS_COM_AGENDA = ['audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+const SERVICOS_COM_AGENDA = SERVICOS_CONFIG.filter(s => s.ativo !== false && s.requerAgenda).map(s => s.codigo);
 function requerAgendaProfissional(ev){
-  return SERVICOS_COM_AGENDA.includes(String(ev?.tipo_servico || '').trim());
+  return servicoRequerAgenda(String(ev?.tipo_servico || '').trim());
 }
 function statusAgendaEvento(ev){
   if(!requerAgendaProfissional(ev)) return 'nao_aplicavel';
@@ -574,7 +604,7 @@ function mensagemAgenda(ev){
 }
 
 async function statusPagamentoInicial(ev){
-  if(String(ev?.tipo_servico || '').trim() === 'divulgacao_gratuita'){
+  if(servicoSomenteDivulgacao(String(ev?.tipo_servico || '').trim())){
     const dados = await calcularPagamentoEvento(ev, '');
     return dados.valor_final > 0 ? 'pendente' : 'dispensado';
   }
@@ -582,7 +612,7 @@ async function statusPagamentoInicial(ev){
 }
 
 async function sincronizarStatusPagamentoDivulgacao(ev){
-  if(!ev || String(ev.tipo_servico || '').trim() !== 'divulgacao_gratuita') return ev;
+  if(!ev || !servicoSomenteDivulgacao(String(ev.tipo_servico || '').trim())) return ev;
   if(ev.status_pagamento === 'pago') return ev;
   const statusCalculado = await statusPagamentoInicial(ev);
   if(ev.status_pagamento === statusCalculado) return ev;
@@ -614,7 +644,7 @@ app.post('/criar-evento', async (req,res)=>{
   if(text(b.website)) return res.status(400).json({error:'Solicitação inválida.'});
   if(await emailBloqueado(user.email)) return res.status(403).json({error:'Este e-mail está bloqueado para cadastro de eventos.'});
   const usuarioConfiavel = await emailConfiavel(user.email);
-  const tiposServicoValidos=['audesc_transmissao','divulgacao_gratuita','audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+  const tiposServicoValidos=listarTiposServicoValidos();
   const tipoSolicitado=text(b.tipo_servico);
   const tipo_servico=tiposServicoValidos.includes(tipoSolicitado)?tipoSolicitado:'audesc_transmissao';
   const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
@@ -787,8 +817,8 @@ async function liberar(req,res){
   if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
   if(ev.status_publicacao!=='aprovado') return res.status(400).json({error:'Evento ainda não está aprovado.'});
   const evSincronizado = await sincronizarStatusPagamentoDivulgacao(ev);
-  if((evSincronizado.tipo_servico==='audesc_transmissao' || evSincronizado.tipo_servico==='audesc_com_audiodescritor' || evSincronizado.tipo_servico==='divulgacao_gratuita') && evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
-  if(evSincronizado.tipo_servico==='divulgacao_gratuita'){
+  if((servicoUsaTransmissao(evSincronizado.tipo_servico) || servicoSomenteDivulgacao(evSincronizado.tipo_servico)) && evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
+  if(servicoSomenteDivulgacao(evSincronizado.tipo_servico)){
    const {data:up,error:er}=await sb.from('eventos').update({status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
    if(er) throw er; return res.json({ok:true,tipo:'divulgacao_gratuita',evento:up});
   }
@@ -1394,7 +1424,7 @@ app.post('/admin/eventos/:id/reenviar-email', async (req,res)=>{
   const {data:ev,error}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).single();
   if(error) throw error;
   if(!ev) return res.status(404).json({error:'Evento não encontrado.'});
-  if(ev.tipo_servico !== 'audesc_transmissao') return res.status(400).json({error:'Este evento não é de transmissão Audesc.'});
+  if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este evento não é de transmissão Audesc.'});
   if(!ev.sala_codigo || !ev.senha_transmissor) return res.status(400).json({error:'Evento ainda não possui sala e senha. Libere o evento antes de reenviar o e-mail.'});
 
   const email_resultado = await enviarEmailLiberacao(ev, ev.senha_transmissor, ev.sala_codigo).catch(err => {
@@ -1686,7 +1716,7 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   if(error) throw error;
   if(!ev) throw new Error('Evento não encontrado para liberação automática.');
 
-  if(ev.tipo_servico !== 'audesc_transmissao'){
+  if(!servicoUsaTransmissao(ev.tipo_servico)){
     console.log('PÓS-PAGAMENTO: evento não é de transmissão Audesc. Não será gerada sala.', eventoId);
     return { ok:false, skipped:true, reason:'Evento não é de transmissão Audesc.' };
   }
@@ -2053,7 +2083,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   }
   if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
   if(Object.prototype.hasOwnProperty.call(update,'tipo_servico')){
-   const tiposServicoValidos=['audesc_transmissao','divulgacao_gratuita','audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+   const tiposServicoValidos=listarTiposServicoValidos();
    const tipoSolicitado=text(update.tipo_servico);
    update.tipo_servico = tiposServicoValidos.includes(tipoSolicitado) ? tipoSolicitado : (ev.tipo_servico || 'audesc_transmissao');
    const evAtualizadoParaCalculo = {...ev, ...update};
