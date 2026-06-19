@@ -88,6 +88,10 @@ function defaultFormularioConfig(){
         link_ingressos: { visivel: true, obrigatorio: false },
         link_programacao: { visivel: true, obrigatorio: false },
         link_acessibilidade: { visivel: true, obrigatorio: false }
+      },
+      limites: {
+        titulo_original: { limitarMinimo: true, minimo: 10, limitarMaximo: true, maximo: 150 },
+        descricao_original: { limitarMinimo: true, minimo: 100, limitarMaximo: true, maximo: 1500 }
       }
     },
     regras: [
@@ -113,9 +117,23 @@ function sanitizarFormularioConfig(input){
     const obj = v && typeof v === 'object' ? v : {};
     return { visivel: obj.visivel !== false, obrigatorio: !!obj.obrigatorio };
   }
+  function limpaLimite(v, def){
+    const obj = v && typeof v === 'object' ? v : {};
+    const minimo = Math.max(0, Math.min(10000, Number(obj.minimo ?? obj.min ?? def.minimo ?? 0)));
+    const maximo = Math.max(1, Math.min(50000, Number(obj.maximo ?? obj.max ?? def.maximo ?? 5000)));
+    return {
+      limitarMinimo: obj.limitarMinimo !== false,
+      minimo: Math.min(minimo, maximo),
+      limitarMaximo: obj.limitarMaximo !== false,
+      maximo
+    };
+  }
   const camposBase = Object.assign({}, base.padrao.campos, cfg.padrao?.campos || {});
   const campos = {};
   for(const k of Object.keys(base.padrao.campos)) campos[k] = limpaCampo(camposBase[k], base.padrao.campos[k]);
+  const limitesBase = Object.assign({}, base.padrao.limites, cfg.padrao?.limites || {});
+  const limites = {};
+  for(const k of Object.keys(base.padrao.limites)) limites[k] = limpaLimite(limitesBase[k], base.padrao.limites[k]);
   const regras = Array.isArray(cfg.regras) ? cfg.regras.map(r => {
     const pais = limit(r.pais_codigo || r.paisCodigo || '', 8).toUpperCase();
     const unidade = limit(r.unidade_codigo || r.unidadeCodigo || '', 30).toUpperCase();
@@ -125,18 +143,24 @@ function sanitizarFormularioConfig(input){
     for(const k of Object.keys(base.padrao.campos)){
       if(Object.prototype.hasOwnProperty.call(rc,k)) camposRegra[k] = limpaCampo(rc[k], campos[k]);
     }
+    const limitesRegra = {};
+    const rl = r.limites && typeof r.limites === 'object' ? r.limites : {};
+    for(const k of Object.keys(base.padrao.limites)){
+      if(Object.prototype.hasOwnProperty.call(rl,k)) limitesRegra[k] = limpaLimite(rl[k], limites[k]);
+    }
     return {
       pais_codigo: pais,
       unidade_codigo: unidade,
       nome: limit(r.nome || '', 160),
       servicosDisponiveis: limpaServicos(r.servicosDisponiveis, base.padrao.servicosDisponiveis),
-      campos: camposRegra
+      campos: camposRegra,
+      limites: limitesRegra
     };
   }).filter(Boolean) : base.regras;
   return {
     versao: 1,
     atualizado_em: new Date().toISOString(),
-    padrao: { servicosDisponiveis: limpaServicos(cfg.padrao?.servicosDisponiveis, base.padrao.servicosDisponiveis), campos },
+    padrao: { servicosDisponiveis: limpaServicos(cfg.padrao?.servicosDisponiveis, base.padrao.servicosDisponiveis), campos, limites },
     regras
   };
 }
@@ -157,10 +181,31 @@ function resolverFormularioConfigParaLocal(config, paisCodigo, unidadeCodigo){
   const unidade = String(unidadeCodigo || '').toUpperCase();
   const regra = cfg.regras.find(r => r.pais_codigo === pais && r.unidade_codigo === unidade);
   const campos = Object.assign({}, cfg.padrao.campos, regra?.campos || {});
+  const limites = Object.assign({}, cfg.padrao.limites, regra?.limites || {});
   return {
     servicosDisponiveis: regra?.servicosDisponiveis?.length ? regra.servicosDisponiveis : cfg.padrao.servicosDisponiveis,
-    campos
+    campos,
+    limites
   };
+}
+
+function validarTextoConfigurado(valor, nomeCampo, cfgLimite, obrigatorio=false){
+  const bruto = String(valor ?? '');
+  const textoLimpo = bruto.trim();
+  const limite = cfgLimite && typeof cfgLimite === 'object' ? cfgLimite : {};
+  const minimo = Math.max(0, Number(limite.minimo || 0));
+  const maximo = Math.max(1, Number(limite.maximo || 5000));
+  if(obrigatorio && !textoLimpo) throw new Error(`Informe ${nomeCampo}.`);
+  if(textoLimpo || obrigatorio){
+    if(limite.limitarMinimo !== false && minimo > 0 && textoLimpo.length < minimo){
+      throw new Error(`${nomeCampo} deve ter pelo menos ${minimo} caracteres.`);
+    }
+    if(limite.limitarMaximo !== false && maximo > 0 && textoLimpo.length > maximo){
+      throw new Error(`${nomeCampo} não pode ultrapassar ${maximo} caracteres.`);
+    }
+  }
+  const corteSeguro = limite.limitarMaximo !== false ? maximo : 5000;
+  return limit(textoLimpo, corteSeguro);
 }
 
 
@@ -747,8 +792,6 @@ app.post('/criar-evento', async (req,res)=>{
   const tipoSolicitado=text(b.tipo_servico);
   const tipo_servico=tiposServicoValidos.includes(tipoSolicitado)?tipoSolicitado:'audesc_transmissao';
   const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
-  const titulo=limit(b.titulo_original,200);
-  if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
   const paisEvento = text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais);
@@ -760,7 +803,11 @@ app.post('/criar-evento', async (req,res)=>{
   if(Array.isArray(localCfg.servicosDisponiveis) && !localCfg.servicosDisponiveis.includes(tipo_servico)){
     return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
   }
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const camposCfg = localCfg.campos || {};
+  const titulo = validarTextoConfigurado(b.titulo_original, 'o nome do evento', localCfg.limites?.titulo_original, true);
+  const descricaoObrigatoria = !!camposCfg.descricao_original?.obrigatorio;
+  const descricaoOriginal = validarTextoConfigurado(b.descricao_original, 'a descrição do evento', localCfg.limites?.descricao_original, descricaoObrigatoria);
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
@@ -2523,11 +2570,17 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
   }
+  const paisCodigoEdicao = limit(update.pais_codigo || ev.pais_codigo || codigoPaisMaps(update.pais || ev.pais),10);
+  const unidadeCodigoEdicao = limit(update.unidade_codigo || ev.unidade_codigo || codigoUnidadeLocal(paisCodigoEdicao, update.uf || ev.uf, ''),20);
+  const formularioCfgEdicao = await obterFormularioConfig();
+  const localCfgEdicao = resolverFormularioConfigParaLocal(formularioCfgEdicao, paisCodigoEdicao, unidadeCodigoEdicao);
   if(Object.prototype.hasOwnProperty.call(update,'titulo_original')){
-   update.titulo_original = limit(update.titulo_original,200);
-   if(!update.titulo_original) return res.status(400).json({error:'Informe o nome do evento.'});
+   update.titulo_original = validarTextoConfigurado(update.titulo_original, 'o nome do evento', localCfgEdicao.limites?.titulo_original, true);
   }
-  if(Object.prototype.hasOwnProperty.call(update,'descricao_original')) update.descricao_original = limit(update.descricao_original,5000);
+  if(Object.prototype.hasOwnProperty.call(update,'descricao_original')){
+   const descricaoObrigatoriaEdicao = !!localCfgEdicao.campos?.descricao_original?.obrigatorio;
+   update.descricao_original = validarTextoConfigurado(update.descricao_original, 'a descrição do evento', localCfgEdicao.limites?.descricao_original, descricaoObrigatoriaEdicao);
+  }
   ['site_oficial','link_ingressos','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
   if(Object.prototype.hasOwnProperty.call(update,'duracao_horas')) update.duracao_horas = Math.max(1,Math.min(8,Number(update.duracao_horas||1)));
   if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes')){
@@ -2552,6 +2605,13 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
   if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
   if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
+  const tipoServicoFinal = update.tipo_servico || ev.tipo_servico;
+  const paisCodigoFinal = update.pais_codigo || paisCodigoEdicao;
+  const unidadeCodigoFinal = update.unidade_codigo || unidadeCodigoEdicao;
+  const localCfgFinal = resolverFormularioConfigParaLocal(formularioCfgEdicao, paisCodigoFinal, unidadeCodigoFinal);
+  if(Array.isArray(localCfgFinal.servicosDisponiveis) && !localCfgFinal.servicosDisponiveis.includes(tipoServicoFinal)){
+   return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
+  }
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
   update.descricao_publicada = Object.prototype.hasOwnProperty.call(update,'descricao_original') ? update.descricao_original : (ev.descricao_publicada || ev.descricao_original);
   update.data_ultima_edicao = new Date().toISOString();
