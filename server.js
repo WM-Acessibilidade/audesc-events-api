@@ -2565,7 +2565,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf','pais_codigo','unidade_codigo','cidade','local_evento','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','cidade','local_evento','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -2601,8 +2601,11 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
   if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
   if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
-  if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
-  if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
+  const paisFinalEdicao = Object.prototype.hasOwnProperty.call(update,'pais') ? update.pais : ev.pais;
+  if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (paisFinalEdicao === 'Outros' || paisFinalEdicao === 'Internacional') ? '' : text(update.uf);
+  if(Object.prototype.hasOwnProperty.call(update,'origem_transmissao')) update.origem_transmissao = paisFinalEdicao === 'Internacional' ? text(update.origem_transmissao) : '';
+  else if(Object.prototype.hasOwnProperty.call(update,'pais') && paisFinalEdicao !== 'Internacional') update.origem_transmissao = '';
+  if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(paisFinalEdicao === 'Internacional' ? update.origem_transmissao : update.pais),10);
   if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
   if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
   const tipoServicoFinal = update.tipo_servico || ev.tipo_servico;
