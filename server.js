@@ -86,6 +86,7 @@ function defaultFormularioConfig(){
         longitude: { visivel: true, obrigatorio: false },
         site_oficial: { visivel: true, obrigatorio: false },
         link_ingressos: { visivel: true, obrigatorio: false },
+        link_inscricao: { visivel: true, obrigatorio: false },
         link_programacao: { visivel: true, obrigatorio: false },
         link_acessibilidade: { visivel: true, obrigatorio: false }
       },
@@ -792,6 +793,7 @@ app.post('/criar-evento', async (req,res)=>{
   const tipoSolicitado=text(b.tipo_servico);
   const tipo_servico=tiposServicoValidos.includes(tipoSolicitado)?tipoSolicitado:'audesc_transmissao';
   const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
+  const divulgar_acesso_ouvintes = tipo_evento === 'publico' && (b.divulgar_acesso_ouvintes === true || text(b.divulgar_acesso_ouvintes) === 'true');
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
   const paisEvento = text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais);
@@ -807,7 +809,7 @@ app.post('/criar-evento', async (req,res)=>{
   const titulo = validarTextoConfigurado(b.titulo_original, 'o nome do evento', localCfg.limites?.titulo_original, true);
   const descricaoObrigatoria = !!camposCfg.descricao_original?.obrigatorio;
   const descricaoOriginal = validarTextoConfigurado(b.descricao_original, 'a descrição do evento', localCfg.limites?.descricao_original, descricaoObrigatoria);
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
       data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
@@ -1771,6 +1773,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'descricao_publicada',
       'site_oficial',
       'link_ingressos',
+      'link_inscricao',
       'link_programacao',
       'link_acessibilidade',
       'data_evento',
@@ -1778,6 +1781,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'max_ouvintes',
       'tipo_servico',
       'tipo_evento',
+      'divulgar_acesso_ouvintes',
       'pais',
       'uf',
       'origem_transmissao',
@@ -1804,6 +1808,9 @@ app.patch('/admin/eventos/:id', async (req, res) => {
         update[key] = req.body[key];
       }
     }
+    ['site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
+    if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
+    if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = update.tipo_evento === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
     if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,300);
     if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
     if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
@@ -1861,7 +1868,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -2565,7 +2572,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','cidade','local_evento','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','cidade','local_evento','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -2581,13 +2588,14 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
    const descricaoObrigatoriaEdicao = !!localCfgEdicao.campos?.descricao_original?.obrigatorio;
    update.descricao_original = validarTextoConfigurado(update.descricao_original, 'a descrição do evento', localCfgEdicao.limites?.descricao_original, descricaoObrigatoriaEdicao);
   }
-  ['site_oficial','link_ingressos','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
+  ['site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
   if(Object.prototype.hasOwnProperty.call(update,'duracao_horas')) update.duracao_horas = Math.max(1,Math.min(8,Number(update.duracao_horas||1)));
   if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes')){
    const n=Math.max(10,Math.min(500,Number(update.max_ouvintes||10)));
    update.max_ouvintes=Math.ceil(n/10)*10;
   }
   if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
+  if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = (update.tipo_evento || ev.tipo_evento) === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
   if(Object.prototype.hasOwnProperty.call(update,'tipo_servico')){
    const tiposServicoValidos=listarTiposServicoValidos();
    const tipoSolicitado=text(update.tipo_servico);
