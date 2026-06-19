@@ -2609,7 +2609,12 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   const paisCodigoFinal = update.pais_codigo || paisCodigoEdicao;
   const unidadeCodigoFinal = update.unidade_codigo || unidadeCodigoEdicao;
   const localCfgFinal = resolverFormularioConfigParaLocal(formularioCfgEdicao, paisCodigoFinal, unidadeCodigoFinal);
-  if(Array.isArray(localCfgFinal.servicosDisponiveis) && !localCfgFinal.servicosDisponiveis.includes(tipoServicoFinal)){
+  const houveMudancaDeServicoOuLocal = Object.prototype.hasOwnProperty.call(update,'tipo_servico') ||
+   Object.prototype.hasOwnProperty.call(update,'pais') ||
+   Object.prototype.hasOwnProperty.call(update,'uf') ||
+   Object.prototype.hasOwnProperty.call(update,'pais_codigo') ||
+   Object.prototype.hasOwnProperty.call(update,'unidade_codigo');
+  if(houveMudancaDeServicoOuLocal && Array.isArray(localCfgFinal.servicosDisponiveis) && !localCfgFinal.servicosDisponiveis.includes(tipoServicoFinal)){
    return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
   }
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
