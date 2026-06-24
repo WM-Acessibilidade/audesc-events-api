@@ -231,9 +231,61 @@ function makeRoom(){
   }
   return 'audesc' + numero + sufixo;
 }
-async function getSheets(){ if(!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) throw new Error('Google Sheets não configurado.'); const auth=new google.auth.JWT({email:GOOGLE_CLIENT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']}); return google.sheets({version:'v4',auth}); }
+async function getSheets(){
+  if(!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) throw new Error('Google Sheets não configurado.');
+  const auth=new google.auth.JWT({
+    email:GOOGLE_CLIENT_EMAIL,
+    key:GOOGLE_PRIVATE_KEY,
+    scopes:['https://www.googleapis.com/auth/spreadsheets']
+  });
+  return google.sheets({version:'v4',auth});
+}
 function endDate(start,hours){ const d=start?new Date(start):new Date(); return new Date(d.getTime()+Number(hours||2)*3600000).toISOString(); }
-async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
+function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+function erroGoogleTemporario(e){
+  const msg = String(e && e.message ? e.message : e || '').toLowerCase();
+  const code = e && (e.code || e.status || e.statusCode || e.response?.status);
+  return [408,429,500,502,503,504].includes(Number(code)) ||
+    msg.includes('premature close') ||
+    msg.includes('socket hang up') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('network') ||
+    msg.includes('fetch failed') ||
+    msg.includes('temporarily unavailable');
+}
+async function appendSheetOnce(ev,senha,sala){
+  const sheets=await getSheets();
+  const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc';
+  const start=ev.data_evento||new Date().toISOString();
+  const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','',''];
+  await sheets.spreadsheets.values.append({
+    spreadsheetId:GOOGLE_SHEET_ID,
+    range:`${SHEET_NAME}!A:N`,
+    valueInputOption:'USER_ENTERED',
+    insertDataOption:'INSERT_ROWS',
+    requestBody:{values:[row]}
+  });
+}
+async function appendSheet(ev,senha,sala){
+  const atrasos = [0, 800, 2000, 5000];
+  let ultimoErro = null;
+  for(let tentativa=0; tentativa<atrasos.length; tentativa++){
+    if(atrasos[tentativa]) await sleep(atrasos[tentativa]);
+    try{
+      await appendSheetOnce(ev,senha,sala);
+      if(tentativa>0) console.log(`Google Sheets: ordem salva após ${tentativa+1} tentativas.`);
+      return;
+    }catch(e){
+      ultimoErro = e;
+      const msg = e && e.message ? e.message : String(e);
+      console.warn(`Google Sheets: falha ao salvar ordem, tentativa ${tentativa+1}/${atrasos.length}:`, msg);
+      if(!erroGoogleTemporario(e) || tentativa === atrasos.length-1) break;
+    }
+  }
+  const msg = ultimoErro && ultimoErro.message ? ultimoErro.message : String(ultimoErro || 'erro desconhecido');
+  throw new Error(msg + ' (após tentativas automáticas de reconexão com o Google Sheets)');
+}
 
 
 async function atualizarStatusPlanilhaLiberacao(sb, eventoId, status, erro){
