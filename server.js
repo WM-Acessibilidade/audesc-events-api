@@ -1780,6 +1780,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'duracao_horas',
       'max_ouvintes',
       'max_ouvintes_extra',
+      'margem_transmissao_minutos',
       'tipo_servico',
       'tipo_evento',
       'divulgar_acesso_ouvintes',
@@ -1826,6 +1827,10 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes_extra')) {
       const extra = Number(update.max_ouvintes_extra || 0);
       update.max_ouvintes_extra = Number.isFinite(extra) ? Math.max(0, Math.min(500, Math.floor(extra))) : 0;
+    }
+    if(Object.prototype.hasOwnProperty.call(update,'margem_transmissao_minutos')) {
+      const margem = Number(update.margem_transmissao_minutos || 15);
+      update.margem_transmissao_minutos = Number.isFinite(margem) ? Math.max(0, Math.min(180, Math.floor(margem))) : 15;
     }
 
     if(Object.prototype.hasOwnProperty.call(update,'status_agenda') && ['disponivel','indisponivel','pendente'].includes(text(update.status_agenda))){
@@ -1896,6 +1901,78 @@ app.get('/public/salas/:sala/limite-ouvintes', async (req,res)=>{
     status_operacao:data.status_operacao || null
   });
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar limite de ouvintes.'})}
+});
+
+
+function calcularJanelaTransmissaoEvento(ev){
+  const margem = Number.isFinite(Number(ev && ev.margem_transmissao_minutos)) ? Math.max(0, Math.min(180, Math.floor(Number(ev.margem_transmissao_minutos)))) : 15;
+  const duracaoHoras = Number(ev && ev.duracao_horas);
+  const inicio = ev && ev.data_evento ? new Date(ev.data_evento) : null;
+  if(!inicio || Number.isNaN(inicio.getTime()) || !Number.isFinite(duracaoHoras) || duracaoHoras <= 0){
+    return {margem, configurado:false, inicio:null, liberacao:null, termino:null, encerramento:null};
+  }
+  const termino = new Date(inicio.getTime() + duracaoHoras * 60 * 60 * 1000);
+  const liberacao = new Date(inicio.getTime() - margem * 60 * 1000);
+  const encerramento = new Date(termino.getTime() + margem * 60 * 1000);
+  return {margem, configurado:true, inicio, liberacao, termino, encerramento};
+}
+function statusJanelaTransmissao(ev){
+  const janela = calcularJanelaTransmissaoEvento(ev);
+  const agora = new Date();
+  if(!janela.configurado){
+    return {
+      ok:true,
+      configurado:false,
+      permitido_entrar:true,
+      permitido_permanecer:true,
+      margem_transmissao_minutos:janela.margem,
+      mensagem:'Janela de transmissão não configurada para este evento.'
+    };
+  }
+  const antes = agora.getTime() < janela.liberacao.getTime();
+  const depois = agora.getTime() > janela.encerramento.getTime();
+  const minutos_ate_liberacao = antes ? Math.ceil((janela.liberacao.getTime() - agora.getTime()) / 60000) : 0;
+  const minutos_restantes = Math.max(0, Math.ceil((janela.encerramento.getTime() - agora.getTime()) / 60000));
+  return {
+    ok:true,
+    configurado:true,
+    permitido_entrar:!antes && !depois,
+    permitido_permanecer:!depois,
+    antes_da_liberacao:antes,
+    apos_encerramento:depois,
+    margem_transmissao_minutos:janela.margem,
+    inicio_evento:janela.inicio.toISOString(),
+    liberacao_transmissao:janela.liberacao.toISOString(),
+    termino_evento:janela.termino.toISOString(),
+    encerramento_transmissao:janela.encerramento.toISOString(),
+    minutos_ate_liberacao,
+    minutos_restantes,
+    mensagem: antes
+      ? `A transmissão será liberada em aproximadamente ${minutos_ate_liberacao} minuto(s).`
+      : depois
+        ? 'A janela de transmissão deste evento foi encerrada.'
+        : `Restam ${minutos_restantes} minuto(s) para o encerramento da transmissão.`
+  };
+}
+
+app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
+ try{
+  const sala = limit(req.params.sala,120);
+  if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
+  const {data,error}=await getSupabase()
+    .from('eventos')
+    .select('id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,margem_transmissao_minutos,status_operacao')
+    .eq('sala_codigo', sala)
+    .maybeSingle();
+  if(error) throw error;
+  if(!data) return res.status(404).json({error:'Sala não encontrada.'});
+  const status = statusJanelaTransmissao(data);
+  res.json(Object.assign(status, {
+    sala_codigo:data.sala_codigo,
+    evento:data.titulo_publicado || data.titulo_original || 'Evento Audesc',
+    status_operacao:data.status_operacao || null
+  }));
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar janela de transmissão.'})}
 });
 
 app.get('/public/eventos', async (req,res)=>{
