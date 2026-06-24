@@ -236,6 +236,41 @@ function endDate(start,hours){ const d=start?new Date(start):new Date(); return 
 async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
 
 
+async function atualizarStatusPlanilhaLiberacao(sb, eventoId, status, erro){
+  try{
+    const payload = {
+      planilha_liberacao_status: status,
+      planilha_liberacao_em: new Date().toISOString()
+    };
+    if(erro) payload.planilha_liberacao_erro = limit(String(erro), 2000);
+    if(!erro) payload.planilha_liberacao_erro = null;
+    const { error } = await sb.from('eventos').update(payload).eq('id', eventoId);
+    if(error) console.warn('Não foi possível registrar status da planilha:', error.message || error);
+  }catch(e){
+    console.warn('Falha ao registrar status da planilha:', e.message || e);
+  }
+}
+
+async function gerarCredenciaisTransmissao(ev, sb){
+  const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
+  const sala = ev.sala_codigo || await gerarSalaUnica(sb);
+  return { senha, sala };
+}
+
+async function salvarOrdemNaPlanilhaOuFalhar(ev, senha, sala, sb){
+  try{
+    await appendSheet(ev, senha, sala);
+    await atualizarStatusPlanilhaLiberacao(sb, ev.id, 'salvo', null);
+    return { ok:true };
+  }catch(e){
+    const msg = e && e.message ? e.message : String(e);
+    console.error('Falha ao salvar ordem na planilha:', msg);
+    await atualizarStatusPlanilhaLiberacao(sb, ev.id, 'erro', msg);
+    throw new Error('Não foi possível gerar a ordem na planilha Google. O evento não foi liberado. Detalhe: ' + msg);
+  }
+}
+
+
 function numeroCoordenada(v){
   if(v === null || v === undefined || v === '') return null;
   const n = Number(String(v).replace(',', '.'));
@@ -1187,14 +1222,16 @@ async function liberar(req,res){
    const {data:up,error:er}=await sb.from('eventos').update({status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
    if(er) throw er; return res.json({ok:true,tipo:'divulgacao_gratuita',evento:up});
   }
-  const senha=ev.senha_transmissor||await gerarSenhaUnica(sb); const sala=ev.sala_codigo||await gerarSalaUnica(sb);
+  const { senha, sala } = await gerarCredenciaisTransmissao(ev, sb);
   const enviarEmailLiberacaoAdmin = !(
     req.query?.enviar_email === 'false' ||
     req.query?.sem_email === 'true' ||
     req.body?.enviar_email === false ||
     req.body?.sem_email === true
   );
-  await appendSheet(ev,senha,sala);
+  // A ordem na planilha precisa ser gerada antes de marcar o evento como liberado.
+  // Isso evita liberação parcial quando há falha temporária no Google OAuth/Sheets.
+  await salvarOrdemNaPlanilhaOuFalhar({...ev, id:req.params.id}, senha, sala, sb);
   const {data:up,error:er}=await sb.from('eventos').update({senha_transmissor:senha,sala_codigo:sala,status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
   if(er) throw er;
   let email_resultado = { ok:false, skipped:true, reason:'Envio automático desmarcado pelo administrador.' };
@@ -1210,6 +1247,31 @@ async function liberar(req,res){
 }
 app.post('/liberar-evento/:id',liberar);
 app.get('/liberar-evento/:id',liberar);
+app.post('/admin/eventos/:id/regerar-ordem', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const sb=getSupabase();
+    const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
+    if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
+    if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
+    if(ev.status_publicacao!=='aprovado') return res.status(400).json({error:'Evento ainda não está aprovado.'});
+    const evSincronizado = await sincronizarStatusPagamentoDivulgacao(ev);
+    if(evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
+    const { senha, sala } = await gerarCredenciaisTransmissao(ev, sb);
+    await salvarOrdemNaPlanilhaOuFalhar({...ev, id:req.params.id}, senha, sala, sb);
+    const {data:up,error:er}=await sb.from('eventos').update({
+      senha_transmissor:senha,
+      sala_codigo:sala,
+      status_operacao:'liberado',
+      data_ultima_edicao:new Date().toISOString()
+    }).eq('id',req.params.id).select().single();
+    if(er) throw er;
+    res.json({ok:true,mensagem:'Ordem de transmissão gerada na planilha e evento liberado.',senha_transmissor:senha,sala_codigo:sala,evento:up});
+  }catch(e){
+    console.error('Erro ao regerar ordem:', e);
+    res.status(500).json({error:e.message||'Erro ao gerar ordem de transmissão.'});
+  }
+});
 
 
 
@@ -2342,8 +2404,12 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
     return { ok:true, already_liberated:true, evento:ev, sala_codigo:ev.sala_codigo, senha_transmissor:ev.senha_transmissor };
   }
 
-  const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
-  const sala = ev.sala_codigo || await gerarSalaUnica(sb);
+  const { senha, sala } = await gerarCredenciaisTransmissao(ev, sb);
+
+  // Primeiro tenta registrar a ordem na planilha. Só depois marca como liberado.
+  // Se o Google OAuth/Sheets falhar, o pagamento pode continuar pago, mas o evento não fica liberado parcialmente.
+  await salvarOrdemNaPlanilhaOuFalhar({...ev, id:eventoId}, senha, sala, sb);
+  console.log('PÓS-PAGAMENTO: dados salvos na planilha:', eventoId, sala);
 
   const { data: up, error: er } = await sb.from('eventos').update({
     status_publicacao: ev.status_publicacao || 'aprovado',
@@ -2355,23 +2421,6 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   }).eq('id', eventoId).select().single();
 
   if(er) throw er;
-
-  try{
-    await appendSheet(up, up.senha_transmissor, up.sala_codigo);
-    await sb.from('eventos').update({
-      planilha_liberacao_status:'salvo',
-      planilha_liberacao_em:new Date().toISOString()
-    }).eq('id', eventoId);
-    console.log('PÓS-PAGAMENTO: dados salvos na planilha:', eventoId, up.sala_codigo);
-  }catch(e){
-    console.error('PÓS-PAGAMENTO: falha ao salvar na planilha:', e.message || e);
-    try{
-      await sb.from('eventos').update({
-        planilha_liberacao_status:'erro',
-        planilha_liberacao_erro:String(e && e.message ? e.message : e)
-      }).eq('id', eventoId);
-    }catch(_e){}
-  }
 
   let email_resultado = { ok:false, skipped:true, reason:'E-mail não enviado.' };
 
