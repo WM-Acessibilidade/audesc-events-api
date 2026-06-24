@@ -93,28 +93,6 @@ function defaultFormularioConfig(){
       limites: {
         titulo_original: { limitarMinimo: true, minimo: 10, limitarMaximo: true, maximo: 150 },
         descricao_original: { limitarMinimo: true, minimo: 100, limitarMaximo: true, maximo: 1500 }
-      },
-      regrasPorServico: {
-        divulgacao_gratuita: {
-          campos: {
-            tipo_evento: { comportamento: 'fixo', valor: 'publico' },
-            divulgar_acesso_ouvintes: { comportamento: 'oculto_sem_valor' },
-            duracao_horas: { comportamento: 'oculto_sem_valor' },
-            max_ouvintes: { comportamento: 'oculto_sem_valor' }
-          }
-        },
-        somente_audiodescritor: {
-          campos: {
-            divulgar_acesso_ouvintes: { comportamento: 'oculto_sem_valor' },
-            max_ouvintes: { comportamento: 'oculto_sem_valor' }
-          }
-        },
-        somente_consultor: {
-          campos: {
-            divulgar_acesso_ouvintes: { comportamento: 'oculto_sem_valor' },
-            max_ouvintes: { comportamento: 'oculto_sem_valor' }
-          }
-        }
       }
     },
     regras: [
@@ -151,35 +129,12 @@ function sanitizarFormularioConfig(input){
       maximo
     };
   }
-  function limpaRegrasPorServico(v, fallback={}){
-    const out = {};
-    const fonte = v && typeof v === 'object' ? v : fallback;
-    const comportamentos = new Set(['usuario','fixo','oculto_sem_valor']);
-    for(const codigo of Object.keys(fonte || {})){
-      if(!validos.has(codigo)) continue;
-      const item = fonte[codigo] && typeof fonte[codigo] === 'object' ? fonte[codigo] : {};
-      const camposFonte = item.campos && typeof item.campos === 'object' ? item.campos : {};
-      const campos = {};
-      for(const campo of Object.keys(base.padrao.campos)){
-        if(!Object.prototype.hasOwnProperty.call(camposFonte, campo)) continue;
-        const c = camposFonte[campo] && typeof camposFonte[campo] === 'object' ? camposFonte[campo] : {};
-        const comportamento = comportamentos.has(c.comportamento || c.modo) ? (c.comportamento || c.modo) : 'usuario';
-        let valor = c.valor;
-        if(campo === 'tipo_evento' && valor !== 'privado') valor = 'publico';
-        if(campo === 'divulgar_acesso_ouvintes') valor = valor === true || String(valor).trim() === 'true';
-        campos[campo] = { comportamento, valor: valor ?? '' };
-      }
-      out[codigo] = { campos };
-    }
-    return out;
-  }
   const camposBase = Object.assign({}, base.padrao.campos, cfg.padrao?.campos || {});
   const campos = {};
   for(const k of Object.keys(base.padrao.campos)) campos[k] = limpaCampo(camposBase[k], base.padrao.campos[k]);
   const limitesBase = Object.assign({}, base.padrao.limites, cfg.padrao?.limites || {});
   const limites = {};
   for(const k of Object.keys(base.padrao.limites)) limites[k] = limpaLimite(limitesBase[k], base.padrao.limites[k]);
-  const regrasPorServicoPadrao = limpaRegrasPorServico(cfg.padrao?.regrasPorServico, base.padrao.regrasPorServico || {});
   const regras = Array.isArray(cfg.regras) ? cfg.regras.map(r => {
     const pais = limit(r.pais_codigo || r.paisCodigo || '', 8).toUpperCase();
     const unidade = limit(r.unidade_codigo || r.unidadeCodigo || '', 30).toUpperCase();
@@ -200,14 +155,13 @@ function sanitizarFormularioConfig(input){
       nome: limit(r.nome || '', 160),
       servicosDisponiveis: limpaServicos(r.servicosDisponiveis, base.padrao.servicosDisponiveis),
       campos: camposRegra,
-      limites: limitesRegra,
-      regrasPorServico: limpaRegrasPorServico(r.regrasPorServico, {})
+      limites: limitesRegra
     };
   }).filter(Boolean) : base.regras;
   return {
     versao: 1,
     atualizado_em: new Date().toISOString(),
-    padrao: { servicosDisponiveis: limpaServicos(cfg.padrao?.servicosDisponiveis, base.padrao.servicosDisponiveis), campos, limites, regrasPorServico: regrasPorServicoPadrao },
+    padrao: { servicosDisponiveis: limpaServicos(cfg.padrao?.servicosDisponiveis, base.padrao.servicosDisponiveis), campos, limites },
     regras
   };
 }
@@ -229,24 +183,11 @@ function resolverFormularioConfigParaLocal(config, paisCodigo, unidadeCodigo){
   const regra = cfg.regras.find(r => r.pais_codigo === pais && r.unidade_codigo === unidade);
   const campos = Object.assign({}, cfg.padrao.campos, regra?.campos || {});
   const limites = Object.assign({}, cfg.padrao.limites, regra?.limites || {});
-  const regrasPorServico = Object.assign({}, cfg.padrao.regrasPorServico || {}, regra?.regrasPorServico || {});
   return {
     servicosDisponiveis: regra?.servicosDisponiveis?.length ? regra.servicosDisponiveis : cfg.padrao.servicosDisponiveis,
     campos,
-    limites,
-    regrasPorServico
+    limites
   };
-}
-function regraCampoPorServico(localCfg, tipoServico, campo){
-  const servico = localCfg?.regrasPorServico?.[tipoServico] || {};
-  return servico?.campos?.[campo] || null;
-}
-function valorConfiguradoPorServico(localCfg, tipoServico, campo, valorOriginal){
-  const regra = regraCampoPorServico(localCfg, tipoServico, campo);
-  const comportamento = regra?.comportamento || regra?.modo || '';
-  if(comportamento === 'fixo') return regra.valor;
-  if(comportamento === 'oculto_sem_valor') return null;
-  return valorOriginal;
 }
 
 function validarTextoConfigurado(valor, nomeCampo, cfgLimite, obrigatorio=false){
@@ -851,10 +792,10 @@ app.post('/criar-evento', async (req,res)=>{
   const tiposServicoValidos=listarTiposServicoValidos();
   const tipoSolicitado=text(b.tipo_servico);
   const tipo_servico=tiposServicoValidos.includes(tipoSolicitado)?tipoSolicitado:'audesc_transmissao';
-  let tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
-  let divulgar_acesso_ouvintes = tipo_evento === 'publico' && (b.divulgar_acesso_ouvintes === true || text(b.divulgar_acesso_ouvintes) === 'true');
-  let duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
-  let max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
+  const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
+  const divulgar_acesso_ouvintes = tipo_evento === 'publico' && (b.divulgar_acesso_ouvintes === true || text(b.divulgar_acesso_ouvintes) === 'true');
+  const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
+  const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
   const paisEvento = text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais);
   const ufEvento = (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf);
   const paisCodigoEvento = limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisEvento),10);
@@ -864,15 +805,6 @@ app.post('/criar-evento', async (req,res)=>{
   if(Array.isArray(localCfg.servicosDisponiveis) && !localCfg.servicosDisponiveis.includes(tipo_servico)){
     return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
   }
-  // Aplica regras configuráveis por serviço antes de gravar o evento.
-  const tipoEventoConfigurado = valorConfiguradoPorServico(localCfg, tipo_servico, 'tipo_evento', tipo_evento);
-  tipo_evento = text(tipoEventoConfigurado) === 'publico' ? 'publico' : 'privado';
-  const acessoConfigurado = valorConfiguradoPorServico(localCfg, tipo_servico, 'divulgar_acesso_ouvintes', divulgar_acesso_ouvintes);
-  divulgar_acesso_ouvintes = tipo_evento === 'publico' && (acessoConfigurado === true || text(acessoConfigurado) === 'true');
-  const duracaoConfigurada = valorConfiguradoPorServico(localCfg, tipo_servico, 'duracao_horas', duracao_horas);
-  const ouvintesConfigurado = valorConfiguradoPorServico(localCfg, tipo_servico, 'max_ouvintes', max_ouvintes);
-  duracao_horas = duracaoConfigurada === null ? null : Math.max(1, Math.min(8, Number(duracaoConfigurada || 2)));
-  max_ouvintes = ouvintesConfigurado === null ? null : Math.max(10, Math.min(500, Number(ouvintesConfigurado || 20)));
   const camposCfg = localCfg.campos || {};
   const titulo = validarTextoConfigurado(b.titulo_original, 'o nome do evento', localCfg.limites?.titulo_original, true);
   const descricaoObrigatoria = !!camposCfg.descricao_original?.obrigatorio;
@@ -1847,6 +1779,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'data_evento',
       'duracao_horas',
       'max_ouvintes',
+      'max_ouvintes_extra',
       'tipo_servico',
       'tipo_evento',
       'divulgar_acesso_ouvintes',
@@ -1890,6 +1823,10 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
     if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
     if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
+    if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes_extra')) {
+      const extra = Number(update.max_ouvintes_extra || 0);
+      update.max_ouvintes_extra = Number.isFinite(extra) ? Math.max(0, Math.min(500, Math.floor(extra))) : 0;
+    }
 
     if(Object.prototype.hasOwnProperty.call(update,'status_agenda') && ['disponivel','indisponivel','pendente'].includes(text(update.status_agenda))){
       if(text(update.status_agenda) === 'disponivel'){
@@ -1933,6 +1870,33 @@ app.patch('/admin/eventos/:id', async (req, res) => {
   }
 });
 
+
+
+app.get('/public/salas/:sala/limite-ouvintes', async (req,res)=>{
+ try{
+  const sala = limit(req.params.sala,120);
+  if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
+  const {data,error}=await getSupabase()
+    .from('eventos')
+    .select('id,titulo_original,titulo_publicado,sala_codigo,max_ouvintes,max_ouvintes_extra,status_operacao')
+    .eq('sala_codigo', sala)
+    .maybeSingle();
+  if(error) throw error;
+  if(!data) return res.status(404).json({error:'Sala não encontrada.'});
+  const max = Number(data.max_ouvintes || 0);
+  const extra = Number(data.max_ouvintes_extra || 0);
+  const limite = max > 0 ? Math.max(1, Math.floor(max + Math.max(0, extra))) : null;
+  res.json({
+    ok:true,
+    sala_codigo:data.sala_codigo,
+    evento:data.titulo_publicado || data.titulo_original || 'Evento Audesc',
+    max_ouvintes:max || null,
+    max_ouvintes_extra:Math.max(0, Math.floor(extra || 0)),
+    limite_ouvintes:limite,
+    status_operacao:data.status_operacao || null
+  });
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar limite de ouvintes.'})}
+});
 
 app.get('/public/eventos', async (req,res)=>{
  try{
@@ -2696,24 +2660,6 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(houveMudancaDeServicoOuLocal && Array.isArray(localCfgFinal.servicosDisponiveis) && !localCfgFinal.servicosDisponiveis.includes(tipoServicoFinal)){
    return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
   }
-  for(const campo of ['tipo_evento','divulgar_acesso_ouvintes','duracao_horas','max_ouvintes']){
-   const valorAtual = Object.prototype.hasOwnProperty.call(update, campo) ? update[campo] : ev[campo];
-   const valorCfg = valorConfiguradoPorServico(localCfgFinal, tipoServicoFinal, campo, valorAtual);
-   if(valorCfg === null){
-    update[campo] = null;
-   }else if(campo === 'tipo_evento'){
-    update[campo] = text(valorCfg) === 'publico' ? 'publico' : 'privado';
-   }else if(campo === 'divulgar_acesso_ouvintes'){
-    const tipoEventoFinal = update.tipo_evento || ev.tipo_evento;
-    update[campo] = tipoEventoFinal === 'publico' && (valorCfg === true || text(valorCfg) === 'true');
-   }else if(campo === 'duracao_horas'){
-    update[campo] = Math.max(1, Math.min(8, Number(valorCfg || 1)));
-   }else if(campo === 'max_ouvintes'){
-    const n = Math.max(10, Math.min(500, Number(valorCfg || 10)));
-    update[campo] = Math.ceil(n/10)*10;
-   }
-  }
-  if((update.tipo_evento || ev.tipo_evento) === 'privado') update.divulgar_acesso_ouvintes = false;
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
   update.descricao_publicada = Object.prototype.hasOwnProperty.call(update,'descricao_original') ? update.descricao_original : (ev.descricao_publicada || ev.descricao_original);
   update.data_ultima_edicao = new Date().toISOString();
