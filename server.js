@@ -1281,11 +1281,27 @@ async function liberar(req,res){
     req.body?.enviar_email === false ||
     req.body?.sem_email === true
   );
-  // A ordem na planilha precisa ser gerada antes de marcar o evento como liberado.
-  // Isso evita liberação parcial quando há falha temporária no Google OAuth/Sheets.
-  await salvarOrdemNaPlanilhaOuFalhar({...ev, id:req.params.id}, senha, sala, sb);
-  const {data:up,error:er}=await sb.from('eventos').update({senha_transmissor:senha,sala_codigo:sala,status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
+  // A ordem passa a existir no próprio Audesc/Supabase.
+  // A planilha Google é apenas sincronização auxiliar, para evitar bloqueio por falhas temporárias do Google OAuth/Sheets.
+  const {data:up,error:er}=await sb.from('eventos').update({
+    senha_transmissor:senha,
+    sala_codigo:sala,
+    status_operacao:'liberado',
+    planilha_liberacao_status:'pendente',
+    planilha_liberacao_erro:null,
+    data_ultima_edicao:new Date().toISOString()
+  }).eq('id',req.params.id).select().single();
   if(er) throw er;
+  let planilha_resultado = {ok:false, skipped:true, status:'pendente'};
+  try{
+    await appendSheet(up, senha, sala);
+    await registrarStatusPlanilha(up.id, 'sincronizado', null);
+    planilha_resultado = {ok:true, status:'sincronizado'};
+  }catch(planilhaErro){
+    const msg = String(planilhaErro && planilhaErro.message ? planilhaErro.message : planilhaErro);
+    await registrarStatusPlanilha(up.id, 'erro', msg);
+    planilha_resultado = {ok:false, status:'erro', error:msg};
+  }
   let email_resultado = { ok:false, skipped:true, reason:'Envio automático desmarcado pelo administrador.' };
   if(enviarEmailLiberacaoAdmin){
     email_resultado = await enviarEmailLiberacao(up, senha, sala).catch(err => {
@@ -1294,7 +1310,7 @@ async function liberar(req,res){
     });
   }
   await registrarResultadoEmail(up.id, email_resultado);
-  res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,email_resultado,evento:up});
+  res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,email_resultado,planilha_resultado,evento:up});
  }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao liberar evento.'}); }
 }
 app.post('/liberar-evento/:id',liberar);
@@ -1306,21 +1322,30 @@ app.post('/admin/eventos/:id/regerar-ordem', async (req,res)=>{
     const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
     if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
     if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
-    if(ev.status_publicacao!=='aprovado') return res.status(400).json({error:'Evento ainda não está aprovado.'});
-    const evSincronizado = await sincronizarStatusPagamentoDivulgacao(ev);
-    if(evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
-    const { senha, sala } = await gerarCredenciaisTransmissao(ev, sb);
-    await salvarOrdemNaPlanilhaOuFalhar({...ev, id:req.params.id}, senha, sala, sb);
+    const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
+    const sala = ev.sala_codigo || await gerarSalaUnica(sb);
     const {data:up,error:er}=await sb.from('eventos').update({
       senha_transmissor:senha,
       sala_codigo:sala,
       status_operacao:'liberado',
+      planilha_liberacao_status:'pendente',
+      planilha_liberacao_erro:null,
       data_ultima_edicao:new Date().toISOString()
     }).eq('id',req.params.id).select().single();
     if(er) throw er;
-    res.json({ok:true,mensagem:'Ordem de transmissão gerada na planilha e evento liberado.',senha_transmissor:senha,sala_codigo:sala,evento:up});
+    let planilha_resultado = {ok:false, status:'pendente'};
+    try{
+      await appendSheet(up, senha, sala);
+      await registrarStatusPlanilha(up.id, 'sincronizado', null);
+      planilha_resultado = {ok:true, status:'sincronizado'};
+    }catch(planilhaErro){
+      const msg = String(planilhaErro && planilhaErro.message ? planilhaErro.message : planilhaErro);
+      await registrarStatusPlanilha(up.id, 'erro', msg);
+      planilha_resultado = {ok:false, status:'erro', error:msg};
+    }
+    res.json({ok:true,mensagem: planilha_resultado.ok ? 'Ordem gerada no Audesc e sincronizada com a planilha.' : 'Ordem gerada no Audesc, mas ainda não sincronizada com a planilha Google.', senha_transmissor:senha,sala_codigo:sala,planilha_resultado,evento:up});
   }catch(e){
-    console.error('Erro ao regerar ordem:', e);
+    console.error('Erro ao gerar/sincronizar ordem:', e);
     res.status(500).json({error:e.message||'Erro ao gerar ordem de transmissão.'});
   }
 });
@@ -1916,7 +1941,9 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'longitude',
       'pais_codigo',
       'unidade_codigo',
-      'cidade'
+      'cidade',
+      'sala_codigo',
+      'senha_transmissor'
     ];
     const update = {};
     for (const key of allowed) {
@@ -1938,6 +1965,8 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
     if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
     if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
+    if(Object.prototype.hasOwnProperty.call(update,'sala_codigo')) update.sala_codigo = limit(update.sala_codigo,120);
+    if(Object.prototype.hasOwnProperty.call(update,'senha_transmissor')) update.senha_transmissor = limit(update.senha_transmissor,80);
     if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes_extra')) {
       const extra = Number(update.max_ouvintes_extra || 0);
       update.max_ouvintes_extra = Number.isFinite(extra) ? Math.max(0, Math.min(500, Math.floor(extra))) : 0;
