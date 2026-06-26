@@ -258,14 +258,41 @@ async function appendSheetOnce(ev,senha,sala){
   const sheets=await getSheets();
   const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc';
   const start=ev.data_evento||new Date().toISOString();
-  const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','',''];
-  await sheets.spreadsheets.values.append({
+  const margem = Number.isFinite(Number(ev.margem_transmissao_minutos)) ? Math.max(0, Math.min(180, Math.floor(Number(ev.margem_transmissao_minutos)))) : 15;
+  const fimComMargem = (() => {
+    const base = start ? new Date(start) : new Date();
+    const duracao = Number(ev.duracao_horas || 2);
+    return new Date(base.getTime() + duracao * 3600000 + margem * 60000).toISOString();
+  })();
+  // Coluna J mantém a margem de antecedência. A coluna G usa o encerramento com a mesma margem,
+  // para compatibilidade com o serviço de tokens que ainda consulta a planilha.
+  const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,fimComMargem,'ativo','sim',margem,'','','',''];
+
+  // Evita criar linhas duplicadas para a mesma sala: se já houver linha na planilha, atualiza.
+  // Se não houver, insere uma nova linha.
+  const existing = await sheets.spreadsheets.values.get({
     spreadsheetId:GOOGLE_SHEET_ID,
-    range:`${SHEET_NAME}!A:N`,
-    valueInputOption:'USER_ENTERED',
-    insertDataOption:'INSERT_ROWS',
-    requestBody:{values:[row]}
-  });
+    range:`${SHEET_NAME}!A:N`
+  }).catch(() => null);
+  const rows = existing && existing.data && Array.isArray(existing.data.values) ? existing.data.values : [];
+  const idx = rows.findIndex(r => String(r[1] || '').trim() === String(sala || '').trim());
+  if (idx >= 0) {
+    const line = idx + 1;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId:GOOGLE_SHEET_ID,
+      range:`${SHEET_NAME}!A${line}:N${line}`,
+      valueInputOption:'USER_ENTERED',
+      requestBody:{values:[row]}
+    });
+  } else {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId:GOOGLE_SHEET_ID,
+      range:`${SHEET_NAME}!A:N`,
+      valueInputOption:'USER_ENTERED',
+      insertDataOption:'INSERT_ROWS',
+      requestBody:{values:[row]}
+    });
+  }
 }
 async function appendSheet(ev,senha,sala){
   const atrasos = [0, 800, 2000, 5000];
