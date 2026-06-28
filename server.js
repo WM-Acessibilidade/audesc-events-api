@@ -303,6 +303,81 @@ async function atualizarStatusPlanilhaLiberacao(sb, eventoId, status, erro){
   }
 }
 
+// Mantém compatibilidade com versões anteriores do código que chamavam registrarStatusPlanilha.
+async function registrarStatusPlanilha(eventoId, status, erro){
+  return atualizarStatusPlanilhaLiberacao(getSupabase(), eventoId, status, erro);
+}
+
+function resumirErroGoogleSheets(e){
+  const msg = e && e.message ? e.message : String(e || 'erro desconhecido');
+  const code = e && (e.code || e.status || e.statusCode || e.response?.status);
+  return { mensagem: msg, codigo: code || null };
+}
+
+function validarVariaveisGoogleSheets(){
+  const faltantes = [];
+  if(!GOOGLE_SHEET_ID) faltantes.push('GOOGLE_SHEET_ID');
+  if(!GOOGLE_CLIENT_EMAIL) faltantes.push('GOOGLE_CLIENT_EMAIL');
+  if(!GOOGLE_PRIVATE_KEY) faltantes.push('GOOGLE_PRIVATE_KEY');
+  if(!SHEET_NAME) faltantes.push('SHEET_NAME');
+  return {
+    ok: faltantes.length === 0,
+    faltantes,
+    sheet_id_configurado: !!GOOGLE_SHEET_ID,
+    client_email_configurado: !!GOOGLE_CLIENT_EMAIL,
+    private_key_configurada: !!GOOGLE_PRIVATE_KEY,
+    private_key_formato_aparente: GOOGLE_PRIVATE_KEY ? (GOOGLE_PRIVATE_KEY.includes('BEGIN PRIVATE KEY') && GOOGLE_PRIVATE_KEY.includes('END PRIVATE KEY')) : false,
+    sheet_name: SHEET_NAME || null
+  };
+}
+
+async function diagnosticarGoogleSheets(){
+  const cfg = validarVariaveisGoogleSheets();
+  const resultado = {
+    ok: false,
+    configuracao: cfg,
+    autenticacao: { ok:false },
+    planilha: { ok:false },
+    leitura: { ok:false },
+    timestamp: new Date().toISOString()
+  };
+  if(!cfg.ok){
+    resultado.erro = 'Variáveis de ambiente do Google Sheets incompletas.';
+    return resultado;
+  }
+  try{
+    const auth = new google.auth.JWT({
+      email: GOOGLE_CLIENT_EMAIL,
+      key: GOOGLE_PRIVATE_KEY,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    await auth.getAccessToken();
+    resultado.autenticacao = { ok:true };
+    const sheets = google.sheets({version:'v4', auth});
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID, fields:'spreadsheetId,properties.title,sheets.properties.title' });
+    const abas = (meta.data.sheets || []).map(x => x.properties && x.properties.title).filter(Boolean);
+    resultado.planilha = { ok:true, titulo: meta.data.properties?.title || null, abas };
+    const abaExiste = abas.includes(SHEET_NAME);
+    if(!abaExiste){
+      resultado.leitura = { ok:false, erro:`A aba "${SHEET_NAME}" não foi encontrada na planilha.` };
+      resultado.ok = false;
+      return resultado;
+    }
+    const leitura = await sheets.spreadsheets.values.get({ spreadsheetId: GOOGLE_SHEET_ID, range:`${SHEET_NAME}!A1:N1` });
+    resultado.leitura = { ok:true, primeira_linha_encontrada: Array.isArray(leitura.data.values) && leitura.data.values.length > 0 };
+    resultado.ok = true;
+    return resultado;
+  }catch(e){
+    const erro = resumirErroGoogleSheets(e);
+    if(!resultado.autenticacao.ok) resultado.autenticacao = { ok:false, erro:erro.mensagem, codigo:erro.codigo };
+    else if(!resultado.planilha.ok) resultado.planilha = { ok:false, erro:erro.mensagem, codigo:erro.codigo };
+    else resultado.leitura = { ok:false, erro:erro.mensagem, codigo:erro.codigo };
+    resultado.erro = erro.mensagem;
+    resultado.codigo = erro.codigo;
+    return resultado;
+  }
+}
+
 async function gerarCredenciaisTransmissao(ev, sb){
   const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
   const sala = ev.sala_codigo || await gerarSalaUnica(sb);
@@ -1351,6 +1426,48 @@ app.post('/admin/eventos/:id/regerar-ordem', async (req,res)=>{
 });
 
 
+app.get('/admin/google-sheets/diagnostico', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const diag = await diagnosticarGoogleSheets();
+    res.status(diag.ok ? 200 : 500).json(diag);
+  }catch(e){
+    res.status(500).json({ ok:false, error:e.message || 'Erro ao diagnosticar Google Sheets.' });
+  }
+});
+
+app.post('/admin/eventos/:id/sincronizar-planilha', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const sb=getSupabase();
+    const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
+    if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
+    if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
+    const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
+    const sala = ev.sala_codigo || await gerarSalaUnica(sb);
+    let eventoParaPlanilha = ev;
+    if(!ev.senha_transmissor || !ev.sala_codigo){
+      const {data:up,error:er}=await sb.from('eventos').update({
+        senha_transmissor: senha,
+        sala_codigo: sala,
+        data_ultima_edicao: new Date().toISOString()
+      }).eq('id',req.params.id).select().single();
+      if(er) throw er;
+      eventoParaPlanilha = up;
+    }
+    try{
+      await appendSheet(eventoParaPlanilha, senha, sala);
+      await atualizarStatusPlanilhaLiberacao(sb, eventoParaPlanilha.id, 'sincronizado', null);
+      res.json({ok:true,mensagem:'Ordem sincronizada com a planilha Google.', sala_codigo:sala, senha_transmissor:senha});
+    }catch(e){
+      const msg = String(e && e.message ? e.message : e);
+      await atualizarStatusPlanilhaLiberacao(sb, eventoParaPlanilha.id, 'erro', msg);
+      res.status(500).json({ok:false,error:'Não foi possível sincronizar com a planilha Google.', detalhe:msg});
+    }
+  }catch(e){
+    res.status(500).json({error:e.message||'Erro ao sincronizar ordem com a planilha.'});
+  }
+});
 
 
 app.get('/formulario-config', async (req,res)=>{
@@ -2487,21 +2604,30 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
 
   const { senha, sala } = await gerarCredenciaisTransmissao(ev, sb);
 
-  // Primeiro tenta registrar a ordem na planilha. Só depois marca como liberado.
-  // Se o Google OAuth/Sheets falhar, o pagamento pode continuar pago, mas o evento não fica liberado parcialmente.
-  await salvarOrdemNaPlanilhaOuFalhar({...ev, id:eventoId}, senha, sala, sb);
-  console.log('PÓS-PAGAMENTO: dados salvos na planilha:', eventoId, sala);
-
+  // A ordem oficial passa a existir primeiro no Supabase/Audesc.
+  // A planilha Google é sincronização auxiliar e não deve bloquear a liberação após pagamento.
   const { data: up, error: er } = await sb.from('eventos').update({
     status_publicacao: ev.status_publicacao || 'aprovado',
     status_pagamento: 'pago',
     status_operacao: 'liberado',
     senha_transmissor: senha,
     sala_codigo: sala,
+    planilha_liberacao_status: 'pendente',
+    planilha_liberacao_erro: null,
     data_ultima_edicao: new Date().toISOString()
   }).eq('id', eventoId).select().single();
 
   if(er) throw er;
+
+  try{
+    await appendSheet(up, senha, sala);
+    await atualizarStatusPlanilhaLiberacao(sb, up.id, 'sincronizado', null);
+    console.log('PÓS-PAGAMENTO: ordem sincronizada com a planilha:', eventoId, sala);
+  }catch(planilhaErro){
+    const msg = String(planilhaErro && planilhaErro.message ? planilhaErro.message : planilhaErro);
+    await atualizarStatusPlanilhaLiberacao(sb, up.id, 'erro', msg);
+    console.warn('PÓS-PAGAMENTO: ordem gerada no Audesc, mas não sincronizada com a planilha:', msg);
+  }
 
   let email_resultado = { ok:false, skipped:true, reason:'E-mail não enviado.' };
 
