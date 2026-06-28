@@ -258,41 +258,14 @@ async function appendSheetOnce(ev,senha,sala){
   const sheets=await getSheets();
   const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc';
   const start=ev.data_evento||new Date().toISOString();
-  const margem = Number.isFinite(Number(ev.margem_transmissao_minutos)) ? Math.max(0, Math.min(180, Math.floor(Number(ev.margem_transmissao_minutos)))) : 15;
-  const fimComMargem = (() => {
-    const base = start ? new Date(start) : new Date();
-    const duracao = Number(ev.duracao_horas || 2);
-    return new Date(base.getTime() + duracao * 3600000 + margem * 60000).toISOString();
-  })();
-  // Coluna J mantém a margem de antecedência. A coluna G usa o encerramento com a mesma margem,
-  // para compatibilidade com o serviço de tokens que ainda consulta a planilha.
-  const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,fimComMargem,'ativo','sim',margem,'','','',''];
-
-  // Evita criar linhas duplicadas para a mesma sala: se já houver linha na planilha, atualiza.
-  // Se não houver, insere uma nova linha.
-  const existing = await sheets.spreadsheets.values.get({
+  const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','',''];
+  await sheets.spreadsheets.values.append({
     spreadsheetId:GOOGLE_SHEET_ID,
-    range:`${SHEET_NAME}!A:N`
-  }).catch(() => null);
-  const rows = existing && existing.data && Array.isArray(existing.data.values) ? existing.data.values : [];
-  const idx = rows.findIndex(r => String(r[1] || '').trim() === String(sala || '').trim());
-  if (idx >= 0) {
-    const line = idx + 1;
-    await sheets.spreadsheets.values.update({
-      spreadsheetId:GOOGLE_SHEET_ID,
-      range:`${SHEET_NAME}!A${line}:N${line}`,
-      valueInputOption:'USER_ENTERED',
-      requestBody:{values:[row]}
-    });
-  } else {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId:GOOGLE_SHEET_ID,
-      range:`${SHEET_NAME}!A:N`,
-      valueInputOption:'USER_ENTERED',
-      insertDataOption:'INSERT_ROWS',
-      requestBody:{values:[row]}
-    });
-  }
+    range:`${SHEET_NAME}!A:N`,
+    valueInputOption:'USER_ENTERED',
+    insertDataOption:'INSERT_ROWS',
+    requestBody:{values:[row]}
+  });
 }
 async function appendSheet(ev,senha,sala){
   const atrasos = [0, 800, 2000, 5000];
@@ -2079,29 +2052,42 @@ function parseDataEventoAudesc(valor){
   if(valor instanceof Date) return valor;
   const raw = String(valor).trim();
   if(!raw) return null;
-
-  // Quando o Supabase/HTML retorna datetime sem fuso, o Node no Render pode interpretar como UTC.
-  // Para o Audesc, datas sem fuso devem ser tratadas como horário local de Brasília por padrão.
   const normalizado = raw.replace(' ', 'T');
-  const temHora = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(normalizado);
+  const temDataHora = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(normalizado);
+  const temApenasData = /^\d{4}-\d{2}-\d{2}$/.test(normalizado);
   const temFuso = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalizado);
-  if(temHora && !temFuso){
-    return new Date(normalizado + '-03:00');
+  if(temApenasData){
+    return { date:null, semHora:true, raw };
   }
-  return new Date(normalizado);
+  if(temDataHora && !temFuso){
+    return { date:new Date(normalizado + '-03:00'), semHora:false, raw, modo:'local_br_sem_fuso' };
+  }
+  return { date:new Date(normalizado), semHora:false, raw, modo:'com_fuso_ou_iso' };
 }
 
 function calcularJanelaTransmissaoEvento(ev){
   const margem = Number.isFinite(Number(ev && ev.margem_transmissao_minutos)) ? Math.max(0, Math.min(180, Math.floor(Number(ev.margem_transmissao_minutos)))) : 15;
   const duracaoHoras = Number(ev && ev.duracao_horas);
-  const inicio = ev && ev.data_evento ? parseDataEventoAudesc(ev.data_evento) : null;
-  if(!inicio || Number.isNaN(inicio.getTime()) || !Number.isFinite(duracaoHoras) || duracaoHoras <= 0){
-    return {margem, configurado:false, inicio:null, liberacao:null, termino:null, encerramento:null};
+  const parsed = ev && ev.data_evento ? parseDataEventoAudesc(ev.data_evento) : null;
+  const inicio = parsed && parsed.date ? parsed.date : null;
+
+  if(!parsed || parsed.semHora || !inicio || Number.isNaN(inicio.getTime()) || !Number.isFinite(duracaoHoras) || duracaoHoras <= 0){
+    return {
+      margem,
+      configurado:false,
+      motivo: parsed && parsed.semHora ? 'data_sem_horario' : 'dados_incompletos',
+      inicio:null,
+      liberacao:null,
+      termino:null,
+      encerramento:null,
+      data_evento_raw: ev && ev.data_evento || null,
+      duracao_horas_raw: ev && ev.duracao_horas || null
+    };
   }
   const termino = new Date(inicio.getTime() + duracaoHoras * 60 * 60 * 1000);
   const liberacao = new Date(inicio.getTime() - margem * 60 * 1000);
   const encerramento = new Date(termino.getTime() + margem * 60 * 1000);
-  return {margem, configurado:true, inicio, liberacao, termino, encerramento, data_evento_raw: ev && ev.data_evento};
+  return {margem, configurado:true, inicio, liberacao, termino, encerramento, data_evento_raw: ev && ev.data_evento, duracao_horas_raw: ev && ev.duracao_horas, parse_modo: parsed.modo || null};
 }
 function statusJanelaTransmissao(ev){
   const janela = calcularJanelaTransmissaoEvento(ev);
@@ -2113,7 +2099,11 @@ function statusJanelaTransmissao(ev){
       permitido_entrar:true,
       permitido_permanecer:true,
       margem_transmissao_minutos:janela.margem,
-      mensagem:'Janela de transmissão não configurada para este evento.'
+      data_evento_original:janela.data_evento_raw || null,
+      duracao_horas_original:janela.duracao_horas_raw || null,
+      agora_servidor:agora.toISOString(),
+      motivo:janela.motivo || 'nao_configurado',
+      mensagem:'Janela de transmissão sem bloqueio automático por falta de data/hora ou duração confiável.'
     };
   }
   const antes = agora.getTime() < janela.liberacao.getTime();
@@ -2133,7 +2123,9 @@ function statusJanelaTransmissao(ev){
     termino_evento:janela.termino.toISOString(),
     encerramento_transmissao:janela.encerramento.toISOString(),
     data_evento_original:janela.data_evento_raw || null,
-    agora_servidor:new Date().toISOString(),
+    duracao_horas_original:janela.duracao_horas_raw || null,
+    parse_modo:janela.parse_modo || null,
+    agora_servidor:agora.toISOString(),
     minutos_ate_liberacao,
     minutos_restantes,
     mensagem: antes
@@ -2533,19 +2525,30 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
 
   const { senha, sala } = await gerarCredenciaisTransmissao(ev, sb);
 
-  // Primeiro tenta registrar a ordem na planilha. Só depois marca como liberado.
-  // Se o Google OAuth/Sheets falhar, o pagamento pode continuar pago, mas o evento não fica liberado parcialmente.
-  await salvarOrdemNaPlanilhaOuFalhar({...ev, id:eventoId}, senha, sala, sb);
-  console.log('PÓS-PAGAMENTO: dados salvos na planilha:', eventoId, sala);
-
+  // A ordem oficial é salva no Supabase. A planilha Google é apenas sincronização auxiliar.
   const { data: up, error: er } = await sb.from('eventos').update({
     status_publicacao: ev.status_publicacao || 'aprovado',
     status_pagamento: 'pago',
     status_operacao: 'liberado',
     senha_transmissor: senha,
     sala_codigo: sala,
+    planilha_liberacao_status: 'pendente',
+    planilha_liberacao_erro: null,
     data_ultima_edicao: new Date().toISOString()
   }).eq('id', eventoId).select().single();
+
+  let planilha_resultado = { ok:false, status:'pendente' };
+  try {
+    await appendSheet(up || {...ev, id:eventoId, senha_transmissor:senha, sala_codigo:sala}, senha, sala);
+    await registrarStatusPlanilha(eventoId, 'sincronizado', null);
+    planilha_resultado = { ok:true, status:'sincronizado' };
+    console.log('PÓS-PAGAMENTO: dados sincronizados com a planilha:', eventoId, sala);
+  } catch(planilhaErro) {
+    const msg = String(planilhaErro && planilhaErro.message ? planilhaErro.message : planilhaErro);
+    await registrarStatusPlanilha(eventoId, 'erro', msg);
+    planilha_resultado = { ok:false, status:'erro', error:msg };
+    console.warn('PÓS-PAGAMENTO: evento liberado no Supabase, mas planilha falhou:', msg);
+  }
 
   if(er) throw er;
 
@@ -2569,7 +2572,7 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   }
 
   console.log('PÓS-PAGAMENTO: evento liberado automaticamente:', eventoId, up.sala_codigo);
-  return { ok:true, evento:up, senha_transmissor:up.senha_transmissor, sala_codigo:up.sala_codigo, email_resultado };
+  return { ok:true, evento:up, senha_transmissor:up.senha_transmissor, sala_codigo:up.sala_codigo, email_resultado, planilha_resultado };
 }
 
 
