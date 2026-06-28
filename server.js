@@ -2074,17 +2074,34 @@ app.get('/public/salas/:sala/limite-ouvintes', async (req,res)=>{
 });
 
 
+function parseDataEventoAudesc(valor){
+  if(!valor) return null;
+  if(valor instanceof Date) return valor;
+  const raw = String(valor).trim();
+  if(!raw) return null;
+
+  // Quando o Supabase/HTML retorna datetime sem fuso, o Node no Render pode interpretar como UTC.
+  // Para o Audesc, datas sem fuso devem ser tratadas como horário local de Brasília por padrão.
+  const normalizado = raw.replace(' ', 'T');
+  const temHora = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(normalizado);
+  const temFuso = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalizado);
+  if(temHora && !temFuso){
+    return new Date(normalizado + '-03:00');
+  }
+  return new Date(normalizado);
+}
+
 function calcularJanelaTransmissaoEvento(ev){
   const margem = Number.isFinite(Number(ev && ev.margem_transmissao_minutos)) ? Math.max(0, Math.min(180, Math.floor(Number(ev.margem_transmissao_minutos)))) : 15;
   const duracaoHoras = Number(ev && ev.duracao_horas);
-  const inicio = ev && ev.data_evento ? new Date(ev.data_evento) : null;
+  const inicio = ev && ev.data_evento ? parseDataEventoAudesc(ev.data_evento) : null;
   if(!inicio || Number.isNaN(inicio.getTime()) || !Number.isFinite(duracaoHoras) || duracaoHoras <= 0){
     return {margem, configurado:false, inicio:null, liberacao:null, termino:null, encerramento:null};
   }
   const termino = new Date(inicio.getTime() + duracaoHoras * 60 * 60 * 1000);
   const liberacao = new Date(inicio.getTime() - margem * 60 * 1000);
   const encerramento = new Date(termino.getTime() + margem * 60 * 1000);
-  return {margem, configurado:true, inicio, liberacao, termino, encerramento};
+  return {margem, configurado:true, inicio, liberacao, termino, encerramento, data_evento_raw: ev && ev.data_evento};
 }
 function statusJanelaTransmissao(ev){
   const janela = calcularJanelaTransmissaoEvento(ev);
@@ -2115,6 +2132,8 @@ function statusJanelaTransmissao(ev){
     liberacao_transmissao:janela.liberacao.toISOString(),
     termino_evento:janela.termino.toISOString(),
     encerramento_transmissao:janela.encerramento.toISOString(),
+    data_evento_original:janela.data_evento_raw || null,
+    agora_servidor:new Date().toISOString(),
     minutos_ate_liberacao,
     minutos_restantes,
     mensagem: antes
