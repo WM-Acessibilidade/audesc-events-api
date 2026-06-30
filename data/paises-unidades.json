@@ -3,48 +3,57 @@
     {
       "name": "Brasil",
       "code": "BR",
-      "unitLabel": "Unidade federativa"
+      "unitLabel": "Unidade federativa",
+      "timezoneDefault": "America/Sao_Paulo"
     },
     {
       "name": "Angola",
       "code": "AO",
-      "unitLabel": "Província"
+      "unitLabel": "Província",
+      "timezoneDefault": "Africa/Luanda"
     },
     {
       "name": "Cabo Verde",
       "code": "CV",
-      "unitLabel": "Ilha"
+      "unitLabel": "Ilha",
+      "timezoneDefault": "Atlantic/Cape_Verde"
     },
     {
       "name": "Guiné-Bissau",
       "code": "GW",
-      "unitLabel": "Região"
+      "unitLabel": "Região",
+      "timezoneDefault": "Africa/Bissau"
     },
     {
       "name": "Guiné Equatorial",
       "code": "GQ",
-      "unitLabel": "Província"
+      "unitLabel": "Província",
+      "timezoneDefault": "Africa/Malabo"
     },
     {
       "name": "Moçambique",
       "code": "MZ",
-      "unitLabel": "Província"
+      "unitLabel": "Província",
+      "timezoneDefault": "Africa/Maputo"
     },
     {
       "name": "Portugal",
       "code": "PT",
-      "unitLabel": "Distrito ou região autônoma"
+      "unitLabel": "Distrito ou região autônoma",
+      "timezoneDefault": "Europe/Lisbon"
     },
     {
       "name": "São Tomé e Príncipe",
       "code": "ST",
-      "unitLabel": "Distrito ou região autônoma"
+      "unitLabel": "Distrito ou região autônoma",
+      "timezoneDefault": "Africa/Sao_Tome"
     },
     {
       "name": "Timor-Leste",
       "code": "TL",
-      "unitLabel": "Município ou região administrativa especial"
+      "unitLabel": "Município ou região administrativa especial",
+      "timezoneDefault": "Asia/Dili"
     }
   ],
-  "note": "Arquivo de referência para expansão internacional. A validação geográfica do backend usa data/location-aliases.json; o frontend usa data/paises-unidades.js. Mantenha os três alinhados ao incluir novos países."
+  "note": "Arquivo de referência para expansão internacional. O backend calcula timezone por país/unidade e armazena o campo timezone nos eventos."
 }

@@ -698,6 +698,74 @@ function codigoPaisMaps(pais){
   }
   return String(pais||'').trim().length===2 ? String(pais).trim().toUpperCase() : '';
 }
+
+
+const TIMEZONE_POR_PAIS = {
+  BR: 'America/Sao_Paulo',
+  PT: 'Europe/Lisbon',
+  AO: 'Africa/Luanda',
+  MZ: 'Africa/Maputo',
+  CV: 'Atlantic/Cape_Verde',
+  GW: 'Africa/Bissau',
+  GQ: 'Africa/Malabo',
+  ST: 'Africa/Sao_Tome',
+  TL: 'Asia/Dili'
+};
+const TIMEZONE_POR_UNIDADE = {
+  BR: {
+    AC:'America/Rio_Branco',
+    AM:'America/Manaus',
+    RO:'America/Porto_Velho',
+    RR:'America/Boa_Vista',
+    MT:'America/Cuiaba',
+    MS:'America/Campo_Grande',
+    DF:'America/Sao_Paulo'
+  },
+  PT: { ACO:'Atlantic/Azores', MAD:'Europe/Lisbon' }
+};
+function timezoneValido(tz){
+  try{ new Intl.DateTimeFormat('en-US',{timeZone:tz}).format(new Date()); return true; }catch(e){ return false; }
+}
+function timezonePorLocal(paisCodigo, unidadeCodigo, paisNome){
+  const p = String(paisCodigo || codigoPaisMaps(paisNome) || '').toUpperCase();
+  const u = String(unidadeCodigo || '').toUpperCase();
+  const tz = (TIMEZONE_POR_UNIDADE[p] && TIMEZONE_POR_UNIDADE[p][u]) || TIMEZONE_POR_PAIS[p] || 'America/Sao_Paulo';
+  return timezoneValido(tz) ? tz : 'America/Sao_Paulo';
+}
+function offsetTimezoneMs(date, timeZone){
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', second:'2-digit',
+    hour12:false
+  });
+  const parts = Object.fromEntries(dtf.formatToParts(date).filter(p=>p.type!=='literal').map(p=>[p.type,p.value]));
+  const asUTC = Date.UTC(Number(parts.year), Number(parts.month)-1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+  return asUTC - date.getTime();
+}
+function localDateTimeToUTCISO(localValue, timeZone){
+  const raw = String(localValue || '').trim();
+  if(!raw) return null;
+  if(/[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw)){
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if(!m){
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  const y=Number(m[1]), mo=Number(m[2]), da=Number(m[3]), h=Number(m[4]), mi=Number(m[5]), se=Number(m[6]||0);
+  const tz = timezoneValido(timeZone) ? timeZone : 'America/Sao_Paulo';
+  let utcMs = Date.UTC(y, mo-1, da, h, mi, se);
+  for(let i=0;i<3;i++) utcMs = Date.UTC(y, mo-1, da, h, mi, se) - offsetTimezoneMs(new Date(utcMs), tz);
+  return new Date(utcMs).toISOString();
+}
+function prepararDataEvento(valor, timezone){
+  const iso = localDateTimeToUTCISO(valor, timezone);
+  return iso || null;
+}
+
 function aliasesPais(codigo){ return [codigo, ...((LOCATION_ALIASES.countries||{})[codigo]||[])].filter(Boolean); }
 function codigoUnidadeLocal(paisCodigo, unidade, unidadeTexto){
   const alvo=[unidade,unidadeTexto].map(normalizarChaveLocal).filter(Boolean);
@@ -960,8 +1028,12 @@ app.post('/criar-evento', async (req,res)=>{
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
   const paisEvento = text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais);
   const ufEvento = (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf);
-  const paisCodigoEvento = limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisEvento),10);
+  const origemTransmissaoEvento = text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '';
+  const paisReferenciaTimezone = text(b.pais)==='Internacional' ? origemTransmissaoEvento : paisEvento;
+  const paisCodigoEvento = limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisReferenciaTimezone || paisEvento),10);
   const unidadeCodigoEvento = limit(b.unidade_codigo || b.unidadeCodigo || codigoUnidadeLocal(paisCodigoEvento, ufEvento, b.ufTexto),20);
+  const timezoneEvento = timezoneValido(b.timezone) ? b.timezone : timezonePorLocal(paisCodigoEvento, unidadeCodigoEvento, paisReferenciaTimezone || paisEvento);
+  const dataEventoNormalizada = prepararDataEvento(b.data_evento, timezoneEvento);
   const formularioCfg = await obterFormularioConfig();
   const localCfg = resolverFormularioConfigParaLocal(formularioCfg, paisCodigoEvento, unidadeCodigoEvento);
   if(Array.isArray(localCfg.servicosDisponiveis) && !localCfg.servicosDisponiveis.includes(tipo_servico)){
@@ -971,10 +1043,10 @@ app.post('/criar-evento', async (req,res)=>{
   const titulo = validarTextoConfigurado(b.titulo_original, 'o nome do evento', localCfg.limites?.titulo_original, true);
   const descricaoObrigatoria = !!camposCfg.descricao_original?.obrigatorio;
   const descricaoOriginal = validarTextoConfigurado(b.descricao_original, 'a descrição do evento', localCfg.limites?.descricao_original, descricaoObrigatoria);
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
-      origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
-      data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
+      origem_transmissao: origemTransmissaoEvento,
+      data_evento:dataEventoNormalizada,duracao_horas,max_ouvintes};
   ev.status_pagamento = await statusPagamentoInicial(ev);
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
@@ -1694,7 +1766,7 @@ app.get('/admin/agenda-pendencias', async (req,res)=>{
   const sb=getSupabase();
   const {data,error}=await sb
    .from('eventos')
-   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,pais_codigo,unidade_codigo,cidade,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,valor_sugerido_agenda,valor_final_agenda,valor_agenda_definido_por_admin,status_pagamento,status_publicacao,status_operacao,created_at')
+   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,valor_sugerido_agenda,valor_final_agenda,valor_agenda_definido_por_admin,status_pagamento,status_publicacao,status_operacao,created_at')
    .in('tipo_servico', SERVICOS_COM_AGENDA)
    .order('created_at',{ascending:false})
    .limit(300);
@@ -2058,6 +2130,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'longitude',
       'pais_codigo',
       'unidade_codigo',
+      'timezone',
       'cidade',
       'sala_codigo',
       'senha_transmissor'
@@ -2081,6 +2154,10 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
     if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
     if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
+    const paisParaTimezoneAdmin = update.pais === 'Internacional' ? update.origem_transmissao : update.pais;
+    if(Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezoneValido(update.timezone) ? update.timezone : timezonePorLocal(update.pais_codigo, update.unidade_codigo, paisParaTimezoneAdmin);
+    else if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.timezone = timezonePorLocal(update.pais_codigo, update.unidade_codigo, paisParaTimezoneAdmin);
+    if(Object.prototype.hasOwnProperty.call(update,'data_evento')) update.data_evento = prepararDataEvento(update.data_evento, update.timezone);
     if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
     if(Object.prototype.hasOwnProperty.call(update,'sala_codigo')) update.sala_codigo = limit(update.sala_codigo,120);
     if(Object.prototype.hasOwnProperty.call(update,'senha_transmissor')) update.senha_transmissor = limit(update.senha_transmissor,80);
@@ -2237,7 +2314,7 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -2937,7 +3014,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','cidade','local_evento','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -2980,6 +3057,10 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   else if(Object.prototype.hasOwnProperty.call(update,'pais') && paisFinalEdicao !== 'Internacional') update.origem_transmissao = '';
   if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(paisFinalEdicao === 'Internacional' ? update.origem_transmissao : update.pais),10);
   if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
+  const paisParaTimezoneUsuario = paisFinalEdicao === 'Internacional' ? update.origem_transmissao || ev.origem_transmissao : paisFinalEdicao;
+  if(Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezoneValido(update.timezone) ? update.timezone : timezonePorLocal(update.pais_codigo || paisCodigoEdicao, update.unidade_codigo || unidadeCodigoEdicao, paisParaTimezoneUsuario);
+  else if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.timezone = timezonePorLocal(update.pais_codigo || paisCodigoEdicao, update.unidade_codigo || unidadeCodigoEdicao, paisParaTimezoneUsuario);
+  if(Object.prototype.hasOwnProperty.call(update,'data_evento')) update.data_evento = prepararDataEvento(update.data_evento, update.timezone || ev.timezone);
   if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
   const tipoServicoFinal = update.tipo_servico || ev.tipo_servico;
   const paisCodigoFinal = update.pais_codigo || paisCodigoEdicao;
