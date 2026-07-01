@@ -1032,7 +1032,8 @@ app.post('/criar-evento', async (req,res)=>{
   const paisReferenciaTimezone = text(b.pais)==='Internacional' ? origemTransmissaoEvento : paisEvento;
   const paisCodigoEvento = limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisReferenciaTimezone || paisEvento),10);
   const unidadeCodigoEvento = limit(b.unidade_codigo || b.unidadeCodigo || codigoUnidadeLocal(paisCodigoEvento, ufEvento, b.ufTexto),20);
-  const timezoneEvento = timezoneValido(b.timezone) ? b.timezone : timezonePorLocal(paisCodigoEvento, unidadeCodigoEvento, paisReferenciaTimezone || paisEvento);
+  const timezoneCalculadoEvento = timezonePorLocal(paisCodigoEvento, unidadeCodigoEvento, paisReferenciaTimezone || paisEvento);
+  const timezoneEvento = timezoneValido(timezoneCalculadoEvento) ? timezoneCalculadoEvento : (timezoneValido(b.timezone) ? b.timezone : 'America/Sao_Paulo');
   const dataEventoNormalizada = prepararDataEvento(b.data_evento, timezoneEvento);
   const formularioCfg = await obterFormularioConfig();
   const localCfg = resolverFormularioConfigParaLocal(formularioCfg, paisCodigoEvento, unidadeCodigoEvento);
@@ -2155,8 +2156,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
     if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
     const paisParaTimezoneAdmin = update.pais === 'Internacional' ? update.origem_transmissao : update.pais;
-    if(Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezoneValido(update.timezone) ? update.timezone : timezonePorLocal(update.pais_codigo, update.unidade_codigo, paisParaTimezoneAdmin);
-    else if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.timezone = timezonePorLocal(update.pais_codigo, update.unidade_codigo, paisParaTimezoneAdmin);
+    if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo') || Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezonePorLocal(update.pais_codigo, update.unidade_codigo, paisParaTimezoneAdmin);
     if(Object.prototype.hasOwnProperty.call(update,'data_evento')) update.data_evento = prepararDataEvento(update.data_evento, update.timezone);
     if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
     if(Object.prototype.hasOwnProperty.call(update,'sala_codigo')) update.sala_codigo = limit(update.sala_codigo,120);
@@ -3058,8 +3058,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(paisFinalEdicao === 'Internacional' ? update.origem_transmissao : update.pais),10);
   if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
   const paisParaTimezoneUsuario = paisFinalEdicao === 'Internacional' ? update.origem_transmissao || ev.origem_transmissao : paisFinalEdicao;
-  if(Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezoneValido(update.timezone) ? update.timezone : timezonePorLocal(update.pais_codigo || paisCodigoEdicao, update.unidade_codigo || unidadeCodigoEdicao, paisParaTimezoneUsuario);
-  else if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.timezone = timezonePorLocal(update.pais_codigo || paisCodigoEdicao, update.unidade_codigo || unidadeCodigoEdicao, paisParaTimezoneUsuario);
+  if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo') || Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezonePorLocal(update.pais_codigo || paisCodigoEdicao, update.unidade_codigo || unidadeCodigoEdicao, paisParaTimezoneUsuario);
   if(Object.prototype.hasOwnProperty.call(update,'data_evento')) update.data_evento = prepararDataEvento(update.data_evento, update.timezone || ev.timezone);
   if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
   const tipoServicoFinal = update.tipo_servico || ev.tipo_servico;
