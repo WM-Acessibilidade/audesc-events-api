@@ -656,6 +656,47 @@ function assinarJwtHs256(payload, secret){
   const signature = crypto.createHmac('sha256', secret).update(encodedHeader + '.' + encodedPayload).digest();
   return encodedHeader + '.' + encodedPayload + '.' + base64UrlEncode(signature);
 }
+
+
+function normalizarCodigoSalaBusca(v){
+  return String(v || '').trim();
+}
+
+async function buscarEventoPorSala(sb, sala, campos){
+  const codigo = normalizarCodigoSalaBusca(sala);
+  if(!codigo) return null;
+  const selectCampos = campos || 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao';
+
+  async function tentarEq(valor){
+    const {data,error}=await sb.from('eventos').select(selectCampos).eq('sala_codigo', valor).limit(1);
+    if(error) throw error;
+    return data && data.length ? data[0] : null;
+  }
+
+  async function tentarIlike(valor){
+    const seguro = String(valor).replace(/[%_]/g, '\\$&');
+    const {data,error}=await sb.from('eventos').select(selectCampos).ilike('sala_codigo', seguro).limit(1);
+    if(error) throw error;
+    return data && data.length ? data[0] : null;
+  }
+
+  const candidatos = Array.from(new Set([codigo, decodeURIComponent(codigo)].filter(Boolean)));
+  for(const c of candidatos){
+    const exato = await tentarEq(c);
+    if(exato) return exato;
+  }
+  for(const c of candidatos){
+    const aproximado = await tentarIlike(c);
+    if(aproximado) return aproximado;
+  }
+
+  // Compatibilidade extra: alguns códigos podem ter diferenças de espaço, maiúsculas/minúsculas ou caracteres invisíveis.
+  const alvo = codigo.toLowerCase().replace(/\s+/g,'');
+  const {data,error}=await sb.from('eventos').select(selectCampos).not('sala_codigo','is',null).order('created_at',{ascending:false}).limit(500);
+  if(error) throw error;
+  return (data || []).find(ev => String(ev.sala_codigo || '').trim().toLowerCase().replace(/\s+/g,'') === alvo) || null;
+}
+
 function normalizarRoleToken(role){
   const r = String(role || '').toLowerCase();
   if(['transmitter','transmissor','publisher'].includes(r)) return 'transmitter';
@@ -2269,12 +2310,8 @@ app.get('/token', async (req,res)=>{
   const password = String(req.query.password || req.query.senha || '').trim();
   if(!room) return res.status(400).json({error:'Código da sala não informado.'});
   const sb = getSupabase();
-  const {data:ev,error}=await sb.from('eventos')
-    .select('id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao')
-    .eq('sala_codigo', room)
-    .maybeSingle();
-  if(error) throw error;
-  if(!ev) return res.status(404).json({error:'Sala não encontrada no Audesc.'});
+  const ev = await buscarEventoPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao');
+  if(!ev) return res.status(404).json({error:'Sala não encontrada no Audesc.', sala_consultada: room});
   const liberado = String(ev.status_operacao || '').toLowerCase() === 'liberado' || String(ev.status_publicacao || '').toLowerCase() === 'aprovado';
   if(!liberado) return res.status(403).json({error:'Esta sala ainda não está liberada.'});
   if(role === 'transmitter'){
@@ -2302,13 +2339,8 @@ app.get('/public/salas/:sala/limite-ouvintes', async (req,res)=>{
  try{
   const sala = limit(req.params.sala,120);
   if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
-  const {data,error}=await getSupabase()
-    .from('eventos')
-    .select('id,titulo_original,titulo_publicado,sala_codigo,max_ouvintes,max_ouvintes_extra,status_operacao')
-    .eq('sala_codigo', sala)
-    .maybeSingle();
-  if(error) throw error;
-  if(!data) return res.status(404).json({error:'Sala não encontrada.'});
+  const data = await buscarEventoPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,max_ouvintes,max_ouvintes_extra,status_operacao,created_at');
+  if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
   const max = Number(data.max_ouvintes || 0);
   const extra = Number(data.max_ouvintes_extra || 0);
   const limite = max > 0 ? Math.max(1, Math.floor(max + Math.max(0, extra))) : null;
@@ -2380,13 +2412,8 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
  try{
   const sala = limit(req.params.sala,120);
   if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
-  const {data,error}=await getSupabase()
-    .from('eventos')
-    .select('id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,margem_transmissao_minutos,status_operacao')
-    .eq('sala_codigo', sala)
-    .maybeSingle();
-  if(error) throw error;
-  if(!data) return res.status(404).json({error:'Sala não encontrada.'});
+  const data = await buscarEventoPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,margem_transmissao_minutos,status_operacao,created_at');
+  if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
   const status = statusJanelaTransmissao(data);
   res.json(Object.assign(status, {
     sala_codigo:data.sala_codigo,
