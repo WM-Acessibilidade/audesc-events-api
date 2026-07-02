@@ -644,6 +644,52 @@ async function emailConfiavel(email){
 }
 
 
+
+function base64UrlEncode(input){
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input));
+  return buf.toString('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+}
+function assinarJwtHs256(payload, secret){
+  const header = { alg:'HS256', typ:'JWT' };
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signature = crypto.createHmac('sha256', secret).update(encodedHeader + '.' + encodedPayload).digest();
+  return encodedHeader + '.' + encodedPayload + '.' + base64UrlEncode(signature);
+}
+function normalizarRoleToken(role){
+  const r = String(role || '').toLowerCase();
+  if(['transmitter','transmissor','publisher'].includes(r)) return 'transmitter';
+  return 'receiver';
+}
+function normalizarIdentityToken(identity, role){
+  const fallback = role === 'transmitter' ? 'Transmissor' : 'Ouvinte';
+  return limit(identity || fallback, 80) || fallback;
+}
+function gerarLiveKitToken({room, identity, role}){
+  const apiKey = process.env.LIVEKIT_API_KEY || process.env.LIVEKIT_KEY || '';
+  const apiSecret = process.env.LIVEKIT_API_SECRET || process.env.LIVEKIT_SECRET || '';
+  if(!apiKey || !apiSecret){
+    throw new Error('Credenciais do LiveKit não configuradas no audesc-events-api. Configure LIVEKIT_API_KEY e LIVEKIT_API_SECRET no Render.');
+  }
+  const agora = Math.floor(Date.now() / 1000);
+  const canPublish = role === 'transmitter';
+  const payload = {
+    iss: apiKey,
+    sub: identity,
+    nbf: agora - 10,
+    exp: agora + 6 * 60 * 60,
+    video: {
+      roomJoin: true,
+      room,
+      canPublish,
+      canSubscribe: true,
+      canPublishData: true,
+      canUpdateOwnMetadata: true
+    }
+  };
+  return assinarJwtHs256(payload, apiSecret);
+}
+
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
 
@@ -2213,6 +2259,44 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 });
 
 
+
+
+app.get('/token', async (req,res)=>{
+ try{
+  const room = limit(req.query.room || req.query.sala, 120);
+  const role = normalizarRoleToken(req.query.role || req.query.papel);
+  const identity = normalizarIdentityToken(req.query.identity || req.query.nome, role);
+  const password = String(req.query.password || req.query.senha || '').trim();
+  if(!room) return res.status(400).json({error:'Código da sala não informado.'});
+  const sb = getSupabase();
+  const {data:ev,error}=await sb.from('eventos')
+    .select('id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao')
+    .eq('sala_codigo', room)
+    .maybeSingle();
+  if(error) throw error;
+  if(!ev) return res.status(404).json({error:'Sala não encontrada no Audesc.'});
+  const liberado = String(ev.status_operacao || '').toLowerCase() === 'liberado' || String(ev.status_publicacao || '').toLowerCase() === 'aprovado';
+  if(!liberado) return res.status(403).json({error:'Esta sala ainda não está liberada.'});
+  if(role === 'transmitter'){
+    const senhaOficial = String(ev.senha_transmissor || '').trim();
+    if(!senhaOficial) return res.status(403).json({error:'A sala ainda não possui senha de transmissor.'});
+    if(password !== senhaOficial) return res.status(403).json({error:'Senha do transmissor inválida.'});
+  }
+  const token = gerarLiveKitToken({room, identity, role});
+  res.json({
+    ok:true,
+    token,
+    room,
+    role,
+    identity,
+    evento: ev.titulo_publicado || ev.titulo_original || 'Evento Audesc',
+    origem_token:'audesc-events-api'
+  });
+ }catch(e){
+  console.error('Erro ao gerar token LiveKit:', e);
+  res.status(500).json({error:e.message || 'Erro ao gerar token de transmissão.'});
+ }
+});
 
 app.get('/public/salas/:sala/limite-ouvintes', async (req,res)=>{
  try{
