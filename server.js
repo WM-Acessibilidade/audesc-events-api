@@ -698,40 +698,120 @@ async function buscarEventoPorSala(sb, sala, campos){
 }
 
 
-async function buscarSalaNaPlanilha(sala){
+
+function normalizarCabecalhoPlanilha(v){
+  return String(v || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g,'_')
+    .replace(/^_+|_+$/g,'');
+}
+function celulaIgualCodigo(a,b){
+  return String(a || '').trim().toLowerCase().replace(/\s+/g,'') === String(b || '').trim().toLowerCase().replace(/\s+/g,'');
+}
+function indicePorCabecalho(headers, nomes){
+  const alvos = nomes.map(normalizarCabecalhoPlanilha);
+  for(let i=0;i<headers.length;i++){
+    const h = normalizarCabecalhoPlanilha(headers[i]);
+    if(alvos.includes(h)) return i;
+  }
+  for(let i=0;i<headers.length;i++){
+    const h = normalizarCabecalhoPlanilha(headers[i]);
+    if(alvos.some(a => h.includes(a) || a.includes(h))) return i;
+  }
+  return -1;
+}
+function valorLinhaPorIndices(row, indices){
+  for(const idx of indices){
+    if(idx >= 0 && row[idx] !== undefined && String(row[idx]).trim()) return String(row[idx]).trim();
+  }
+  return '';
+}
+
+async function buscarSalaNaPlanilha(sala, password){
   const codigo = normalizarCodigoSalaBusca(sala);
   if(!codigo) return null;
   try{
     const sheets = await getSheets();
     const resp = await sheets.spreadsheets.values.get({
       spreadsheetId: GOOGLE_SHEET_ID,
-      range: `${SHEET_NAME}!A:N`
+      range: `${SHEET_NAME}!A:Z`
     });
     const rows = resp.data && resp.data.values ? resp.data.values : [];
-    const alvo = String(codigo).trim().toLowerCase().replace(/\s+/g,'');
-    for(let i=0;i<rows.length;i++){
-      const row = rows[i] || [];
-      const senha = String(row[0] || '').trim();
-      const salaPlanilha = String(row[1] || '').trim();
-      if(!salaPlanilha) continue;
-      const salaNormalizada = salaPlanilha.toLowerCase().replace(/\s+/g,'');
-      if(salaNormalizada !== alvo) continue;
-      const statusPlanilha = String(row[7] || '').trim().toLowerCase();
-      if(statusPlanilha && !['ativo','liberado','aprovado','sim','ok'].includes(statusPlanilha)){
+    if(!rows.length) return null;
+
+    const headers = rows[0] || [];
+    const idxSala = indicePorCabecalho(headers, [
+      'sala','codigo_sala','codigo da sala','código da sala','sala_codigo','codigo','código','room','room_code','roomcode'
+    ]);
+    const idxSenha = indicePorCabecalho(headers, [
+      'senha','senha_transmissor','senha do transmissor','senha de transmissor','password','transmitter_password'
+    ]);
+    const idxTitulo = indicePorCabecalho(headers, [
+      'evento','titulo','título','nome_evento','nome do evento','titulo_publicado','title'
+    ]);
+    const idxMax = indicePorCabecalho(headers, [
+      'max_ouvintes','max ouvintes','numero_maximo_ouvintes','número máximo de ouvintes','ouvintes','maximo ouvintes'
+    ]);
+    const idxDuracao = indicePorCabecalho(headers, [
+      'duracao','duração','duracao_horas','duração horas','horas','duration'
+    ]);
+    const idxData = indicePorCabecalho(headers, [
+      'data','data_evento','data e hora','inicio','início','start','start_time'
+    ]);
+    const idxStatus = indicePorCabecalho(headers, [
+      'status','ativo','liberado','publicado','status_operacao','status_publicacao'
+    ]);
+
+    const linhas = rows.slice(1);
+    const possivelCabecalho = headers.some(h => normalizarCabecalhoPlanilha(h).includes('sala') || normalizarCabecalhoPlanilha(h).includes('senha'));
+    const linhasParaBuscar = possivelCabecalho ? linhas : rows;
+
+    for(let i=0;i<linhasParaBuscar.length;i++){
+      const row = linhasParaBuscar[i] || [];
+      let indiceSalaEncontrada = -1;
+      let salaPlanilha = '';
+
+      if(idxSala >= 0 && celulaIgualCodigo(row[idxSala], codigo)){
+        indiceSalaEncontrada = idxSala;
+        salaPlanilha = String(row[idxSala] || '').trim();
+      }else{
+        for(let c=0;c<row.length;c++){
+          if(celulaIgualCodigo(row[c], codigo)){
+            indiceSalaEncontrada = c;
+            salaPlanilha = String(row[c] || '').trim();
+            break;
+          }
+        }
+      }
+      if(indiceSalaEncontrada < 0 || !salaPlanilha) continue;
+
+      const statusPlanilha = idxStatus >= 0 ? String(row[idxStatus] || '').trim().toLowerCase() : '';
+      // Se houver uma coluna de status reconhecida, bloqueia apenas status claramente negativos.
+      if(statusPlanilha && ['cancelado','cancelada','inativo','inativa','bloqueado','bloqueada','encerrado','encerrada','negado','negada'].includes(statusPlanilha)){
         continue;
       }
+
+      let senha = valorLinhaPorIndices(row, [idxSenha, 0]);
+      // Compatibilidade com planilhas antigas: quando a sala está em B, a senha costuma estar em A; quando a sala estiver em outra coluna, tenta a célula anterior.
+      if(!senha && indiceSalaEncontrada > 0) senha = String(row[indiceSalaEncontrada - 1] || '').trim();
+      if(!senha && password){
+        const senhaEncontradaNaLinha = row.find(c => celulaIgualCodigo(c, password));
+        if(senhaEncontradaNaLinha) senha = String(senhaEncontradaNaLinha).trim();
+      }
+
       return {
         id: `planilha-${i+1}`,
         origem: 'google_sheets',
-        titulo_original: row[2] || 'Evento Audesc',
-        titulo_publicado: row[2] || 'Evento Audesc',
+        titulo_original: valorLinhaPorIndices(row, [idxTitulo, 2]) || 'Evento Audesc',
+        titulo_publicado: valorLinhaPorIndices(row, [idxTitulo, 2]) || 'Evento Audesc',
         sala_codigo: salaPlanilha,
         senha_transmissor: senha,
         status_operacao: 'liberado',
         status_publicacao: 'aprovado',
-        max_ouvintes: Number(row[3] || 0) || null,
-        duracao_horas: Number(row[4] || 0) || null,
-        data_evento: row[5] || null
+        max_ouvintes: Number(valorLinhaPorIndices(row, [idxMax, 3]) || 0) || null,
+        duracao_horas: Number(valorLinhaPorIndices(row, [idxDuracao, 4]) || 0) || null,
+        data_evento: valorLinhaPorIndices(row, [idxData, 5]) || null
       };
     }
   }catch(e){
@@ -740,10 +820,10 @@ async function buscarSalaNaPlanilha(sala){
   return null;
 }
 
-async function buscarEventoOuPlanilhaPorSala(sb, sala, campos){
+async function buscarEventoOuPlanilhaPorSala(sb, sala, campos, opts){
   const ev = await buscarEventoPorSala(sb, sala, campos);
   if(ev) return ev;
-  return await buscarSalaNaPlanilha(sala);
+  return await buscarSalaNaPlanilha(sala, opts && opts.password);
 }
 
 function senhaAdminValida(password){
@@ -2365,7 +2445,7 @@ app.get('/token', async (req,res)=>{
   const password = String(req.query.password || req.query.senha || '').trim();
   if(!room) return res.status(400).json({error:'Código da sala não informado.'});
   const sb = getSupabase();
-  const ev = await buscarEventoOuPlanilhaPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao,max_ouvintes,duracao_horas,data_evento');
+  const ev = await buscarEventoOuPlanilhaPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao,max_ouvintes,duracao_horas,data_evento', {password});
   if(!ev) return res.status(404).json({error:'Sala não encontrada no Audesc.', sala_consultada: room});
   const liberado = String(ev.status_operacao || '').toLowerCase() === 'liberado' || String(ev.status_publicacao || '').toLowerCase() === 'aprovado';
   if(!liberado) return res.status(403).json({error:'Esta sala ainda não está liberada.'});
