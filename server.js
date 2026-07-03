@@ -697,6 +697,61 @@ async function buscarEventoPorSala(sb, sala, campos){
   return (data || []).find(ev => String(ev.sala_codigo || '').trim().toLowerCase().replace(/\s+/g,'') === alvo) || null;
 }
 
+
+async function buscarSalaNaPlanilha(sala){
+  const codigo = normalizarCodigoSalaBusca(sala);
+  if(!codigo) return null;
+  try{
+    const sheets = await getSheets();
+    const resp = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${SHEET_NAME}!A:N`
+    });
+    const rows = resp.data && resp.data.values ? resp.data.values : [];
+    const alvo = String(codigo).trim().toLowerCase().replace(/\s+/g,'');
+    for(let i=0;i<rows.length;i++){
+      const row = rows[i] || [];
+      const senha = String(row[0] || '').trim();
+      const salaPlanilha = String(row[1] || '').trim();
+      if(!salaPlanilha) continue;
+      const salaNormalizada = salaPlanilha.toLowerCase().replace(/\s+/g,'');
+      if(salaNormalizada !== alvo) continue;
+      const statusPlanilha = String(row[7] || '').trim().toLowerCase();
+      if(statusPlanilha && !['ativo','liberado','aprovado','sim','ok'].includes(statusPlanilha)){
+        continue;
+      }
+      return {
+        id: `planilha-${i+1}`,
+        origem: 'google_sheets',
+        titulo_original: row[2] || 'Evento Audesc',
+        titulo_publicado: row[2] || 'Evento Audesc',
+        sala_codigo: salaPlanilha,
+        senha_transmissor: senha,
+        status_operacao: 'liberado',
+        status_publicacao: 'aprovado',
+        max_ouvintes: Number(row[3] || 0) || null,
+        duracao_horas: Number(row[4] || 0) || null,
+        data_evento: row[5] || null
+      };
+    }
+  }catch(e){
+    console.warn('Fallback Google Sheets para sala falhou:', e && e.message ? e.message : e);
+  }
+  return null;
+}
+
+async function buscarEventoOuPlanilhaPorSala(sb, sala, campos){
+  const ev = await buscarEventoPorSala(sb, sala, campos);
+  if(ev) return ev;
+  return await buscarSalaNaPlanilha(sala);
+}
+
+function senhaAdminValida(password){
+  const senha = String(password || '').trim();
+  const senhasAdmin = [process.env.ADMIN_TRANSMITTER_PASSWORD, ADMIN_TOKEN].filter(Boolean).map(v => String(v).trim()).filter(Boolean);
+  return !!senha && senhasAdmin.includes(senha);
+}
+
 function normalizarRoleToken(role){
   const r = String(role || '').toLowerCase();
   if(['transmitter','transmissor','publisher'].includes(r)) return 'transmitter';
@@ -2310,23 +2365,30 @@ app.get('/token', async (req,res)=>{
   const password = String(req.query.password || req.query.senha || '').trim();
   if(!room) return res.status(400).json({error:'Código da sala não informado.'});
   const sb = getSupabase();
-  const ev = await buscarEventoPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao');
+  const ev = await buscarEventoOuPlanilhaPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao,max_ouvintes,duracao_horas,data_evento');
   if(!ev) return res.status(404).json({error:'Sala não encontrada no Audesc.', sala_consultada: room});
   const liberado = String(ev.status_operacao || '').toLowerCase() === 'liberado' || String(ev.status_publicacao || '').toLowerCase() === 'aprovado';
   if(!liberado) return res.status(403).json({error:'Esta sala ainda não está liberada.'});
+  const acessoAdmin = role === 'transmitter' && senhaAdminValida(password);
   if(role === 'transmitter'){
     const senhaOficial = String(ev.senha_transmissor || '').trim();
-    if(!senhaOficial) return res.status(403).json({error:'A sala ainda não possui senha de transmissor.'});
-    if(password !== senhaOficial) return res.status(403).json({error:'Senha do transmissor inválida.'});
+    if(!senhaOficial && !acessoAdmin) return res.status(403).json({error:'A sala ainda não possui senha de transmissor.'});
+    if(!acessoAdmin && password !== senhaOficial) return res.status(403).json({error:'Senha do transmissor inválida.'});
   }
-  const token = gerarLiveKitToken({room, identity, role});
+  const tokenIdentity = role === 'transmitter'
+    ? `${identity}-${crypto.randomBytes(3).toString('hex')}`
+    : identity;
+  const token = gerarLiveKitToken({room: ev.sala_codigo || room, identity: tokenIdentity, role});
   res.json({
     ok:true,
     token,
-    room,
+    room: ev.sala_codigo || room,
     role,
-    identity,
+    identity: tokenIdentity,
+    nome_informado: identity,
+    acesso: acessoAdmin ? 'admin' : 'padrao',
     evento: ev.titulo_publicado || ev.titulo_original || 'Evento Audesc',
+    origem_sala: ev.origem || 'supabase',
     origem_token:'audesc-events-api'
   });
  }catch(e){
@@ -2339,7 +2401,7 @@ app.get('/public/salas/:sala/limite-ouvintes', async (req,res)=>{
  try{
   const sala = limit(req.params.sala,120);
   if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
-  const data = await buscarEventoPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,max_ouvintes,max_ouvintes_extra,status_operacao,created_at');
+  const data = await buscarEventoOuPlanilhaPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,max_ouvintes,max_ouvintes_extra,status_operacao,created_at');
   if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
   const max = Number(data.max_ouvintes || 0);
   const extra = Number(data.max_ouvintes_extra || 0);
@@ -2412,7 +2474,7 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
  try{
   const sala = limit(req.params.sala,120);
   if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
-  const data = await buscarEventoPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,margem_transmissao_minutos,status_operacao,created_at');
+  const data = await buscarEventoOuPlanilhaPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,margem_transmissao_minutos,status_operacao,created_at');
   if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
   const status = statusJanelaTransmissao(data);
   res.json(Object.assign(status, {
