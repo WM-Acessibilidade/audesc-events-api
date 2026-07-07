@@ -709,6 +709,52 @@ function normalizarCabecalhoPlanilha(v){
 function celulaIgualCodigo(a,b){
   return String(a || '').trim().toLowerCase().replace(/\s+/g,'') === String(b || '').trim().toLowerCase().replace(/\s+/g,'');
 }
+
+function numeroOuNull(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function gpsConfigEvento(ev){
+  const exigir = ev && (ev.exigir_gps_ouvintes === true || String(ev.exigir_gps_ouvintes || '').toLowerCase() === 'true');
+  const lat = numeroOuNull(ev && ev.latitude);
+  const lon = numeroOuNull(ev && ev.longitude);
+  const raio = Math.max(10, Math.min(5000, Math.floor(Number((ev && ev.gps_raio_metros) || 200))));
+  const precisaoMax = Math.max(10, Math.min(5000, Math.floor(Number((ev && ev.gps_precisao_max_metros) || 500))));
+  return {exigir, latitude:lat, longitude:lon, raio_metros:raio, precisao_max_metros:precisaoMax, configurado: exigir && lat !== null && lon !== null};
+}
+function distanciaMetros(lat1, lon1, lat2, lon2){
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const p1 = toRad(lat1), p2 = toRad(lat2);
+  const dp = toRad(lat2 - lat1);
+  const dl = toRad(lon2 - lon1);
+  const a = Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+function validarGpsOuvinte(ev, query){
+  const cfg = gpsConfigEvento(ev);
+  if(!cfg.exigir) return {ok:true, exigido:false, config:cfg};
+  if(!cfg.configurado){
+    return {ok:false, exigido:true, config:cfg, error:'Este evento exige presença no local, mas as coordenadas do evento não estão configuradas.'};
+  }
+  const lat = numeroOuNull(query.lat || query.latitude);
+  const lon = numeroOuNull(query.lon || query.lng || query.longitude);
+  const acc = Math.max(0, Number(query.accuracy || query.precisao || 0));
+  if(lat === null || lon === null){
+    return {ok:false, exigido:true, config:cfg, error:'Para entrar nesta transmissão, permita o acesso à localização do dispositivo.'};
+  }
+  if(acc && acc > cfg.precisao_max_metros){
+    return {ok:false, exigido:true, config:cfg, distancia_metros:null, precisao_metros:acc, error:`A localização informada está imprecisa demais (${Math.round(acc)} m). Tente novamente em local aberto ou mais próximo do evento.`};
+  }
+  const dist = distanciaMetros(cfg.latitude, cfg.longitude, lat, lon);
+  // Considera a margem de precisão do GPS a favor do ouvinte para evitar bloqueios injustos.
+  const distanciaAjustada = Math.max(0, dist - (Number.isFinite(acc) ? acc : 0));
+  if(distanciaAjustada > cfg.raio_metros){
+    return {ok:false, exigido:true, config:cfg, distancia_metros:Math.round(dist), distancia_ajustada_metros:Math.round(distanciaAjustada), precisao_metros:acc||null, error:'A transmissão está restrita a ouvintes presentes no local do evento.'};
+  }
+  return {ok:true, exigido:true, config:cfg, distancia_metros:Math.round(dist), distancia_ajustada_metros:Math.round(distanciaAjustada), precisao_metros:acc||null};
+}
 function indicePorCabecalho(headers, nomes){
   const alvos = nomes.map(normalizarCabecalhoPlanilha);
   for(let i=0;i<headers.length;i++){
@@ -811,7 +857,12 @@ async function buscarSalaNaPlanilha(sala, password){
         status_publicacao: 'aprovado',
         max_ouvintes: Number(valorLinhaPorIndices(row, [idxMax, 3]) || 0) || null,
         duracao_horas: Number(valorLinhaPorIndices(row, [idxDuracao, 4]) || 0) || null,
-        data_evento: valorLinhaPorIndices(row, [idxData, 5]) || null
+        data_evento: valorLinhaPorIndices(row, [idxData, 5]) || null,
+        exigir_gps_ouvintes: false,
+        gps_raio_metros: null,
+        gps_precisao_max_metros: null,
+        latitude: null,
+        longitude: null
       };
     }
   }catch(e){
@@ -2356,7 +2407,10 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'timezone',
       'cidade',
       'sala_codigo',
-      'senha_transmissor'
+      'senha_transmissor',
+      'exigir_gps_ouvintes',
+      'gps_raio_metros',
+      'gps_precisao_max_metros'
     ];
     const update = {};
     for (const key of allowed) {
@@ -2383,6 +2437,15 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
     if(Object.prototype.hasOwnProperty.call(update,'sala_codigo')) update.sala_codigo = limit(update.sala_codigo,120);
     if(Object.prototype.hasOwnProperty.call(update,'senha_transmissor')) update.senha_transmissor = limit(update.senha_transmissor,80);
+    if(Object.prototype.hasOwnProperty.call(update,'exigir_gps_ouvintes')) update.exigir_gps_ouvintes = update.exigir_gps_ouvintes === true || text(update.exigir_gps_ouvintes) === 'true' || text(update.exigir_gps_ouvintes) === 'sim' || text(update.exigir_gps_ouvintes) === '1';
+    if(Object.prototype.hasOwnProperty.call(update,'gps_raio_metros')) {
+      const raio = Number(update.gps_raio_metros || 200);
+      update.gps_raio_metros = Number.isFinite(raio) ? Math.max(10, Math.min(5000, Math.floor(raio))) : 200;
+    }
+    if(Object.prototype.hasOwnProperty.call(update,'gps_precisao_max_metros')) {
+      const precisao = Number(update.gps_precisao_max_metros || 500);
+      update.gps_precisao_max_metros = Number.isFinite(precisao) ? Math.max(10, Math.min(5000, Math.floor(precisao))) : 500;
+    }
     if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes_extra')) {
       const extra = Number(update.max_ouvintes_extra || 0);
       update.max_ouvintes_extra = Number.isFinite(extra) ? Math.max(0, Math.min(500, Math.floor(extra))) : 0;
@@ -2445,7 +2508,7 @@ app.get('/token', async (req,res)=>{
   const password = String(req.query.password || req.query.senha || '').trim();
   if(!room) return res.status(400).json({error:'Código da sala não informado.'});
   const sb = getSupabase();
-  const ev = await buscarEventoOuPlanilhaPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao,max_ouvintes,duracao_horas,data_evento', {password});
+  const ev = await buscarEventoOuPlanilhaPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao,max_ouvintes,duracao_horas,data_evento,latitude,longitude,exigir_gps_ouvintes,gps_raio_metros,gps_precisao_max_metros', {password});
   if(!ev) return res.status(404).json({error:'Sala não encontrada no Audesc.', sala_consultada: room});
   const liberado = String(ev.status_operacao || '').toLowerCase() === 'liberado' || String(ev.status_publicacao || '').toLowerCase() === 'aprovado';
   if(!liberado) return res.status(403).json({error:'Esta sala ainda não está liberada.'});
@@ -2454,6 +2517,10 @@ app.get('/token', async (req,res)=>{
     const senhaOficial = String(ev.senha_transmissor || '').trim();
     if(!senhaOficial && !acessoAdmin) return res.status(403).json({error:'A sala ainda não possui senha de transmissor.'});
     if(!acessoAdmin && password !== senhaOficial) return res.status(403).json({error:'Senha do transmissor inválida.'});
+  }
+  if(role === 'receiver'){
+    const gps = validarGpsOuvinte(ev, req.query || {});
+    if(!gps.ok) return res.status(403).json({error:gps.error || 'Entrada não autorizada pela localização.', gps});
   }
   const tokenIdentity = role === 'transmitter'
     ? `${identity}-${crypto.randomBytes(3).toString('hex')}`
@@ -2469,12 +2536,37 @@ app.get('/token', async (req,res)=>{
     acesso: acessoAdmin ? 'admin' : 'padrao',
     evento: ev.titulo_publicado || ev.titulo_original || 'Evento Audesc',
     origem_sala: ev.origem || 'supabase',
-    origem_token:'audesc-events-api'
+    origem_token:'audesc-events-api',
+    gps: gpsConfigEvento(ev)
   });
  }catch(e){
   console.error('Erro ao gerar token LiveKit:', e);
   res.status(500).json({error:e.message || 'Erro ao gerar token de transmissão.'});
  }
+});
+
+
+app.get('/public/salas/:sala/controle-presenca', async (req,res)=>{
+ try{
+  const sala = limit(req.params.sala,120);
+  if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
+  const data = await buscarEventoOuPlanilhaPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,latitude,longitude,local_evento,exigir_gps_ouvintes,gps_raio_metros,gps_precisao_max_metros,status_operacao,created_at');
+  if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
+  const cfg = gpsConfigEvento(data);
+  res.json({
+    ok:true,
+    sala_codigo:data.sala_codigo || sala,
+    evento:data.titulo_publicado || data.titulo_original || 'Evento Audesc',
+    local_evento:data.local_evento || '',
+    exigir_gps_ouvintes:cfg.exigir,
+    gps_configurado:cfg.configurado,
+    gps_raio_metros:cfg.raio_metros,
+    gps_precisao_max_metros:cfg.precisao_max_metros,
+    latitude:cfg.exigir ? cfg.latitude : null,
+    longitude:cfg.exigir ? cfg.longitude : null,
+    status_operacao:data.status_operacao || null
+  });
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar controle de presença.'})}
 });
 
 app.get('/public/salas/:sala/limite-ouvintes', async (req,res)=>{
