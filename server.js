@@ -1206,6 +1206,63 @@ async function geocodeNominatim(query, ctx){
   return null;
 }
 
+
+async function sugerirGooglePlaces(query, ctx){
+  if(!GOOGLE_MAPS_API_KEY) return [];
+  const variantes=montarVariantesConsultaLocal(query, ctx.pais, ctx.uf, ctx.ufTexto).slice(0,4);
+  const resultados=[];
+  const vistos=new Set();
+  for(const consulta of variantes){
+    const body={textQuery:consulta,languageCode:'pt-BR',maxResultCount:8};
+    if(ctx.codigoPais) body.regionCode=ctx.codigoPais;
+    const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
+        'X-Goog-FieldMask':'places.id,places.displayName,places.formattedAddress,places.location,places.addressComponents'
+      },
+      body:JSON.stringify(body)
+    });
+    if(!r.ok) continue;
+    const j=await r.json().catch(()=>({}));
+    for(const item of (Array.isArray(j.places)?j.places:[])){
+      if(!resultadoGoogleNovoDentro(item,ctx)) continue;
+      const loc=item.location||{};
+      const lat=Number(loc.latitude), lon=Number(loc.longitude);
+      if(!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
+      const endereco=String(item.formattedAddress||'').trim();
+      const nome=String(item.displayName?.text||endereco||query).trim();
+      const chave=(item.id||`${lat},${lon}`).toLowerCase();
+      if(vistos.has(chave)) continue;
+      vistos.add(chave);
+      resultados.push({id:item.id||chave,nome,endereco,lat,lon,provedor:'google_places_new'});
+      if(resultados.length>=5) return resultados;
+    }
+  }
+  return resultados;
+}
+
+app.get('/geocode/sugestoes', async (req,res)=>{
+  try{
+    const query=limit(req.query.q,300);
+    if(!query || query.length<3) return res.json({ok:true,resultados:[]});
+    const pais=limit(req.query.pais,80);
+    const uf=limit(req.query.uf,40);
+    const ufTexto=limit(req.query.ufTexto,120);
+    const codigoPaisInformado=limit(req.query.paisCodigo,10);
+    const codigoUnidadeInformado=limit(req.query.unidadeCodigo,20);
+    const codigoPais=(codigoPaisInformado || codigoPaisMaps(pais)).toUpperCase();
+    const unidadeCodigo=(codigoUnidadeInformado || codigoUnidadeLocal(codigoPais,uf,ufTexto)).toUpperCase();
+    const ctx={pais,uf,ufTexto,codigoPais,unidadeCodigo};
+    const resultados=await sugerirGooglePlaces(query,ctx);
+    return res.json({ok:true,resultados});
+  }catch(e){
+    console.error('Erro ao sugerir locais:',e);
+    return res.status(500).json({error:'Erro ao buscar sugestões de locais.'});
+  }
+});
+
 app.get('/geocode', async (req,res)=>{
   try{
     const query=limit(req.query.q,300);
@@ -1218,8 +1275,8 @@ app.get('/geocode', async (req,res)=>{
     const codigoPais=(codigoPaisInformado || codigoPaisMaps(pais)).toUpperCase();
     const unidadeCodigo=(codigoUnidadeInformado || codigoUnidadeLocal(codigoPais, uf, ufTexto)).toUpperCase();
     const ctx={pais,uf,ufTexto,codigoPais,unidadeCodigo};
-    let resultado=await geocodeNominatim(query,ctx);
-    if(!resultado) resultado=await geocodeGoogle(query,ctx);
+    let resultado=await geocodeGoogle(query,ctx);
+    if(!resultado) resultado=await geocodeNominatim(query,ctx);
     if(!resultado){
       return res.status(404).json({error:'Local não encontrado na região selecionada. Tente informar também bairro, cidade ou endereço completo.'});
     }
