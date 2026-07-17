@@ -3,6 +3,8 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { google } = require('googleapis');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -33,6 +35,181 @@ const MERCADOPAGO_VALOR_EVENTO = Number(process.env.MERCADOPAGO_VALOR_EVENTO || 
 const MERCADOPAGO_NOTIFICATION_URL = process.env.MERCADOPAGO_NOTIFICATION_URL || 'https://audesc-events-api.onrender.com/webhooks/mercadopago';
 const AUDESC_WEB_URL = process.env.AUDESC_WEB_URL || 'https://wm-acessibilidade.github.io/audesc-web';
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
+function carregarServicosConfig(){
+  const padrao = [
+    {codigo:'audesc_transmissao',nome:'Transmissão Audesc (transmissor e receptores)',ativo:true,requerAgenda:false,usaTransmissao:true,somenteDivulgacao:false,somenteProfissional:false,permiteValorManual:false},
+    {codigo:'divulgacao_gratuita',nome:'Somente divulgação no Audesc',ativo:true,requerAgenda:false,usaTransmissao:false,somenteDivulgacao:true,somenteProfissional:false,permiteValorManual:false},
+    {codigo:'audesc_com_audiodescritor',nome:'Serviço completo - Audesc + audiodescritor',ativo:true,requerAgenda:true,usaTransmissao:true,somenteDivulgacao:false,somenteProfissional:false,permiteValorManual:true},
+    {codigo:'somente_audiodescritor',nome:'Audiodescritor',ativo:true,requerAgenda:true,usaTransmissao:false,somenteDivulgacao:false,somenteProfissional:true,permiteValorManual:true},
+    {codigo:'somente_consultor',nome:'Consultor',ativo:true,requerAgenda:true,usaTransmissao:false,somenteDivulgacao:false,somenteProfissional:true,permiteValorManual:true}
+  ];
+  try{
+    const file = path.join(__dirname, 'data', 'servicos.json');
+    if(fs.existsSync(file)){
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if(Array.isArray(data) && data.length) return data;
+    }
+  }catch(e){
+    console.warn('Não foi possível carregar data/servicos.json. Usando configuração padrão.', e.message || e);
+  }
+  return padrao;
+}
+const SERVICOS_CONFIG = carregarServicosConfig();
+const SERVICOS_MAP = new Map(SERVICOS_CONFIG.map(s => [s.codigo, s]));
+function servicoConfig(codigo){ return SERVICOS_MAP.get(String(codigo || '').trim()) || null; }
+function nomeServico(codigo){ return servicoConfig(codigo)?.nome || codigo || '—'; }
+function servicoAtivo(codigo){ const s=servicoConfig(codigo); return !!s && s.ativo !== false; }
+function listarTiposServicoValidos(){ return SERVICOS_CONFIG.filter(s => s.ativo !== false).map(s => s.codigo); }
+function servicoRequerAgenda(codigo){ return !!servicoConfig(codigo)?.requerAgenda; }
+function servicoSomenteDivulgacao(codigo){ return !!servicoConfig(codigo)?.somenteDivulgacao; }
+function servicoSomenteProfissional(codigo){ return !!servicoConfig(codigo)?.somenteProfissional; }
+function servicoUsaTransmissao(codigo){ return !!servicoConfig(codigo)?.usaTransmissao; }
+
+function defaultFormularioConfig(){
+  const codigos = listarTiposServicoValidos();
+  const basicos = codigos.filter(c => c === 'audesc_transmissao' || c === 'divulgacao_gratuita');
+  const todos = codigos.slice();
+  return {
+    versao: 1,
+    atualizado_em: null,
+    padrao: {
+      servicosDisponiveis: basicos.length ? basicos : todos,
+      campos: {
+        descricao_original: { visivel: true, obrigatorio: false },
+        tipo_evento: { visivel: true, obrigatorio: true },
+        divulgar_acesso_ouvintes: { visivel: true, obrigatorio: false },
+        data_evento: { visivel: true, obrigatorio: false },
+        duracao_horas: { visivel: true, obrigatorio: true },
+        max_ouvintes: { visivel: true, obrigatorio: true },
+        local_evento: { visivel: true, obrigatorio: false },
+        latitude: { visivel: true, obrigatorio: false },
+        longitude: { visivel: true, obrigatorio: false },
+        site_oficial: { visivel: true, obrigatorio: false },
+        link_ingressos: { visivel: true, obrigatorio: false },
+        link_inscricao: { visivel: true, obrigatorio: false },
+        link_programacao: { visivel: true, obrigatorio: false },
+        link_acessibilidade: { visivel: true, obrigatorio: false }
+      },
+      limites: {
+        titulo_original: { limitarMinimo: true, minimo: 10, limitarMaximo: true, maximo: 150 },
+        descricao_original: { limitarMinimo: true, minimo: 100, limitarMaximo: true, maximo: 1500 }
+      }
+    },
+    regras: [
+      {
+        pais_codigo: 'BR',
+        unidade_codigo: 'DF',
+        nome: 'Brasil - Distrito Federal',
+        servicosDisponiveis: todos,
+        campos: {}
+      }
+    ]
+  };
+}
+function sanitizarFormularioConfig(input){
+  const base = defaultFormularioConfig();
+  const cfg = input && typeof input === 'object' ? input : {};
+  const validos = new Set(listarTiposServicoValidos());
+  function limpaServicos(arr, fallback){
+    const list = Array.isArray(arr) ? arr : fallback;
+    return [...new Set((list || []).filter(c => validos.has(c)))];
+  }
+  function limpaCampo(v, def={visivel:true, obrigatorio:false}){
+    const obj = v && typeof v === 'object' ? v : {};
+    return { visivel: obj.visivel !== false, obrigatorio: !!obj.obrigatorio };
+  }
+  function limpaLimite(v, def){
+    const obj = v && typeof v === 'object' ? v : {};
+    const minimo = Math.max(0, Math.min(10000, Number(obj.minimo ?? obj.min ?? def.minimo ?? 0)));
+    const maximo = Math.max(1, Math.min(50000, Number(obj.maximo ?? obj.max ?? def.maximo ?? 5000)));
+    return {
+      limitarMinimo: obj.limitarMinimo !== false,
+      minimo: Math.min(minimo, maximo),
+      limitarMaximo: obj.limitarMaximo !== false,
+      maximo
+    };
+  }
+  const camposBase = Object.assign({}, base.padrao.campos, cfg.padrao?.campos || {});
+  const campos = {};
+  for(const k of Object.keys(base.padrao.campos)) campos[k] = limpaCampo(camposBase[k], base.padrao.campos[k]);
+  const limitesBase = Object.assign({}, base.padrao.limites, cfg.padrao?.limites || {});
+  const limites = {};
+  for(const k of Object.keys(base.padrao.limites)) limites[k] = limpaLimite(limitesBase[k], base.padrao.limites[k]);
+  const regras = Array.isArray(cfg.regras) ? cfg.regras.map(r => {
+    const pais = limit(r.pais_codigo || r.paisCodigo || '', 8).toUpperCase();
+    const unidade = limit(r.unidade_codigo || r.unidadeCodigo || '', 30).toUpperCase();
+    if(!pais || !unidade) return null;
+    const camposRegra = {};
+    const rc = r.campos && typeof r.campos === 'object' ? r.campos : {};
+    for(const k of Object.keys(base.padrao.campos)){
+      if(Object.prototype.hasOwnProperty.call(rc,k)) camposRegra[k] = limpaCampo(rc[k], campos[k]);
+    }
+    const limitesRegra = {};
+    const rl = r.limites && typeof r.limites === 'object' ? r.limites : {};
+    for(const k of Object.keys(base.padrao.limites)){
+      if(Object.prototype.hasOwnProperty.call(rl,k)) limitesRegra[k] = limpaLimite(rl[k], limites[k]);
+    }
+    return {
+      pais_codigo: pais,
+      unidade_codigo: unidade,
+      nome: limit(r.nome || '', 160),
+      servicosDisponiveis: limpaServicos(r.servicosDisponiveis, base.padrao.servicosDisponiveis),
+      campos: camposRegra,
+      limites: limitesRegra
+    };
+  }).filter(Boolean) : base.regras;
+  return {
+    versao: 1,
+    atualizado_em: new Date().toISOString(),
+    padrao: { servicosDisponiveis: limpaServicos(cfg.padrao?.servicosDisponiveis, base.padrao.servicosDisponiveis), campos, limites },
+    regras
+  };
+}
+async function obterFormularioConfig(){
+  const fallback = defaultFormularioConfig();
+  try{
+    const {data,error} = await getSupabase().from('formulario_config').select('config').eq('id','default').maybeSingle();
+    if(error) throw error;
+    if(data?.config) return sanitizarFormularioConfig(data.config);
+  }catch(e){
+    console.warn('Usando configuração padrão do formulário:', e.message || e);
+  }
+  return fallback;
+}
+function resolverFormularioConfigParaLocal(config, paisCodigo, unidadeCodigo){
+  const cfg = sanitizarFormularioConfig(config);
+  const pais = String(paisCodigo || '').toUpperCase();
+  const unidade = String(unidadeCodigo || '').toUpperCase();
+  const regra = cfg.regras.find(r => r.pais_codigo === pais && r.unidade_codigo === unidade);
+  const campos = Object.assign({}, cfg.padrao.campos, regra?.campos || {});
+  const limites = Object.assign({}, cfg.padrao.limites, regra?.limites || {});
+  return {
+    servicosDisponiveis: regra?.servicosDisponiveis?.length ? regra.servicosDisponiveis : cfg.padrao.servicosDisponiveis,
+    campos,
+    limites
+  };
+}
+
+function validarTextoConfigurado(valor, nomeCampo, cfgLimite, obrigatorio=false){
+  const bruto = String(valor ?? '');
+  const textoLimpo = bruto.trim();
+  const limite = cfgLimite && typeof cfgLimite === 'object' ? cfgLimite : {};
+  const minimo = Math.max(0, Number(limite.minimo || 0));
+  const maximo = Math.max(1, Number(limite.maximo || 5000));
+  if(obrigatorio && !textoLimpo) throw new Error(`Informe ${nomeCampo}.`);
+  if(textoLimpo || obrigatorio){
+    if(limite.limitarMinimo !== false && minimo > 0 && textoLimpo.length < minimo){
+      throw new Error(`${nomeCampo} deve ter pelo menos ${minimo} caracteres.`);
+    }
+    if(limite.limitarMaximo !== false && maximo > 0 && textoLimpo.length > maximo){
+      throw new Error(`${nomeCampo} não pode ultrapassar ${maximo} caracteres.`);
+    }
+  }
+  const corteSeguro = limite.limitarMaximo !== false ? maximo : 5000;
+  return limit(textoLimpo, corteSeguro);
+}
+
+
 
 function text(v){ return String(v || '').trim(); }
 function limit(v,n){ return text(v).slice(0,n); }
@@ -54,9 +231,171 @@ function makeRoom(){
   }
   return 'audesc' + numero + sufixo;
 }
-async function getSheets(){ if(!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) throw new Error('Google Sheets não configurado.'); const auth=new google.auth.JWT({email:GOOGLE_CLIENT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']}); return google.sheets({version:'v4',auth}); }
+async function getSheets(){
+  if(!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) throw new Error('Google Sheets não configurado.');
+  const auth=new google.auth.JWT({
+    email:GOOGLE_CLIENT_EMAIL,
+    key:GOOGLE_PRIVATE_KEY,
+    scopes:['https://www.googleapis.com/auth/spreadsheets']
+  });
+  return google.sheets({version:'v4',auth});
+}
 function endDate(start,hours){ const d=start?new Date(start):new Date(); return new Date(d.getTime()+Number(hours||2)*3600000).toISOString(); }
-async function appendSheet(ev,senha,sala){ const sheets=await getSheets(); const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc'; const start=ev.data_evento||new Date().toISOString(); const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','','']; await sheets.spreadsheets.values.append({spreadsheetId:GOOGLE_SHEET_ID,range:`${SHEET_NAME}!A:N`,valueInputOption:'USER_ENTERED',insertDataOption:'INSERT_ROWS',requestBody:{values:[row]}}); }
+function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+function erroGoogleTemporario(e){
+  const msg = String(e && e.message ? e.message : e || '').toLowerCase();
+  const code = e && (e.code || e.status || e.statusCode || e.response?.status);
+  return [408,429,500,502,503,504].includes(Number(code)) ||
+    msg.includes('premature close') ||
+    msg.includes('socket hang up') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('network') ||
+    msg.includes('fetch failed') ||
+    msg.includes('temporarily unavailable');
+}
+async function appendSheetOnce(ev,senha,sala){
+  const sheets=await getSheets();
+  const title=ev.titulo_publicado||ev.titulo_original||'Evento Audesc';
+  const start=ev.data_evento||new Date().toISOString();
+  const row=[senha,sala,title,ev.max_ouvintes||20,ev.duracao_horas||2,start,endDate(start,ev.duracao_horas),'ativo','sim',10,'','','',''];
+  await sheets.spreadsheets.values.append({
+    spreadsheetId:GOOGLE_SHEET_ID,
+    range:`${SHEET_NAME}!A:N`,
+    valueInputOption:'USER_ENTERED',
+    insertDataOption:'INSERT_ROWS',
+    requestBody:{values:[row]}
+  });
+}
+async function appendSheet(ev,senha,sala){
+  const atrasos = [0, 800, 2000, 5000];
+  let ultimoErro = null;
+  for(let tentativa=0; tentativa<atrasos.length; tentativa++){
+    if(atrasos[tentativa]) await sleep(atrasos[tentativa]);
+    try{
+      await appendSheetOnce(ev,senha,sala);
+      if(tentativa>0) console.log(`Google Sheets: ordem salva após ${tentativa+1} tentativas.`);
+      return;
+    }catch(e){
+      ultimoErro = e;
+      const msg = e && e.message ? e.message : String(e);
+      console.warn(`Google Sheets: falha ao salvar ordem, tentativa ${tentativa+1}/${atrasos.length}:`, msg);
+      if(!erroGoogleTemporario(e) || tentativa === atrasos.length-1) break;
+    }
+  }
+  const msg = ultimoErro && ultimoErro.message ? ultimoErro.message : String(ultimoErro || 'erro desconhecido');
+  throw new Error(msg + ' (após tentativas automáticas de reconexão com o Google Sheets)');
+}
+
+
+async function atualizarStatusPlanilhaLiberacao(sb, eventoId, status, erro){
+  try{
+    const payload = {
+      planilha_liberacao_status: status,
+      planilha_liberacao_em: new Date().toISOString()
+    };
+    if(erro) payload.planilha_liberacao_erro = limit(String(erro), 2000);
+    if(!erro) payload.planilha_liberacao_erro = null;
+    const { error } = await sb.from('eventos').update(payload).eq('id', eventoId);
+    if(error) console.warn('Não foi possível registrar status da planilha:', error.message || error);
+  }catch(e){
+    console.warn('Falha ao registrar status da planilha:', e.message || e);
+  }
+}
+
+// Mantém compatibilidade com versões anteriores do código que chamavam registrarStatusPlanilha.
+async function registrarStatusPlanilha(eventoId, status, erro){
+  return atualizarStatusPlanilhaLiberacao(getSupabase(), eventoId, status, erro);
+}
+
+function resumirErroGoogleSheets(e){
+  const msg = e && e.message ? e.message : String(e || 'erro desconhecido');
+  const code = e && (e.code || e.status || e.statusCode || e.response?.status);
+  return { mensagem: msg, codigo: code || null };
+}
+
+function validarVariaveisGoogleSheets(){
+  const faltantes = [];
+  if(!GOOGLE_SHEET_ID) faltantes.push('GOOGLE_SHEET_ID');
+  if(!GOOGLE_CLIENT_EMAIL) faltantes.push('GOOGLE_CLIENT_EMAIL');
+  if(!GOOGLE_PRIVATE_KEY) faltantes.push('GOOGLE_PRIVATE_KEY');
+  if(!SHEET_NAME) faltantes.push('SHEET_NAME');
+  return {
+    ok: faltantes.length === 0,
+    faltantes,
+    sheet_id_configurado: !!GOOGLE_SHEET_ID,
+    client_email_configurado: !!GOOGLE_CLIENT_EMAIL,
+    private_key_configurada: !!GOOGLE_PRIVATE_KEY,
+    private_key_formato_aparente: GOOGLE_PRIVATE_KEY ? (GOOGLE_PRIVATE_KEY.includes('BEGIN PRIVATE KEY') && GOOGLE_PRIVATE_KEY.includes('END PRIVATE KEY')) : false,
+    sheet_name: SHEET_NAME || null
+  };
+}
+
+async function diagnosticarGoogleSheets(){
+  const cfg = validarVariaveisGoogleSheets();
+  const resultado = {
+    ok: false,
+    configuracao: cfg,
+    autenticacao: { ok:false },
+    planilha: { ok:false },
+    leitura: { ok:false },
+    timestamp: new Date().toISOString()
+  };
+  if(!cfg.ok){
+    resultado.erro = 'Variáveis de ambiente do Google Sheets incompletas.';
+    return resultado;
+  }
+  try{
+    const auth = new google.auth.JWT({
+      email: GOOGLE_CLIENT_EMAIL,
+      key: GOOGLE_PRIVATE_KEY,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    await auth.getAccessToken();
+    resultado.autenticacao = { ok:true };
+    const sheets = google.sheets({version:'v4', auth});
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID, fields:'spreadsheetId,properties.title,sheets.properties.title' });
+    const abas = (meta.data.sheets || []).map(x => x.properties && x.properties.title).filter(Boolean);
+    resultado.planilha = { ok:true, titulo: meta.data.properties?.title || null, abas };
+    const abaExiste = abas.includes(SHEET_NAME);
+    if(!abaExiste){
+      resultado.leitura = { ok:false, erro:`A aba "${SHEET_NAME}" não foi encontrada na planilha.` };
+      resultado.ok = false;
+      return resultado;
+    }
+    const leitura = await sheets.spreadsheets.values.get({ spreadsheetId: GOOGLE_SHEET_ID, range:`${SHEET_NAME}!A1:N1` });
+    resultado.leitura = { ok:true, primeira_linha_encontrada: Array.isArray(leitura.data.values) && leitura.data.values.length > 0 };
+    resultado.ok = true;
+    return resultado;
+  }catch(e){
+    const erro = resumirErroGoogleSheets(e);
+    if(!resultado.autenticacao.ok) resultado.autenticacao = { ok:false, erro:erro.mensagem, codigo:erro.codigo };
+    else if(!resultado.planilha.ok) resultado.planilha = { ok:false, erro:erro.mensagem, codigo:erro.codigo };
+    else resultado.leitura = { ok:false, erro:erro.mensagem, codigo:erro.codigo };
+    resultado.erro = erro.mensagem;
+    resultado.codigo = erro.codigo;
+    return resultado;
+  }
+}
+
+async function gerarCredenciaisTransmissao(ev, sb){
+  const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
+  const sala = ev.sala_codigo || await gerarSalaUnica(sb);
+  return { senha, sala };
+}
+
+async function salvarOrdemNaPlanilhaOuFalhar(ev, senha, sala, sb){
+  try{
+    await appendSheet(ev, senha, sala);
+    await atualizarStatusPlanilhaLiberacao(sb, ev.id, 'salvo', null);
+    return { ok:true };
+  }catch(e){
+    const msg = e && e.message ? e.message : String(e);
+    console.error('Falha ao salvar ordem na planilha:', msg);
+    await atualizarStatusPlanilhaLiberacao(sb, ev.id, 'erro', msg);
+    throw new Error('Não foi possível gerar a ordem na planilha Google. O evento não foi liberado. Detalhe: ' + msg);
+  }
+}
 
 
 function numeroCoordenada(v){
@@ -147,15 +486,15 @@ async function calcularValorBaseServico(ev, moeda){
  const tipo=text(ev.tipo_servico)||'audesc_transmissao';
  const duracao=Math.max(1,Number(ev.duracao_horas||1));
  const ouvintes=Math.max(10,Number(ev.max_ouvintes||10));
- if(tipo==='divulgacao_gratuita'){
+ if(servicoSomenteDivulgacao(tipo)){
   const preco=await obterPrecoServico(tipo,moeda);
   const valorServico=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
-  return {valor_original:arredondarValor(valorServico),ouvintes:null,duracao_horas:1,tipo_servico:tipo,detalhes:{descricao:'Divulgação no Audesc',valor_servico:valorServico}};
+  return {valor_original:arredondarValor(valorServico),ouvintes:null,duracao_horas:1,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_servico:valorServico}};
  }
- if(tipo==='somente_audiodescritor'||tipo==='somente_consultor'){
+ if(servicoSomenteProfissional(tipo)){
   const preco=await obterPrecoServico(tipo,moeda);
   const valorHora=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
-  return {valor_original:arredondarValor(valorHora*duracao),ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:tipo==='somente_audiodescritor'?'Somente audiodescritor':'Somente consultor',valor_hora:valorHora}};
+  return {valor_original:arredondarValor(valorHora*duracao),ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_hora:valorHora}};
  }
  if(tipo==='audesc_com_audiodescritor'){
   const pAud=await obterPrecificacao(moeda,'audesc_transmissao');
@@ -163,9 +502,39 @@ async function calcularValorBaseServico(ev, moeda){
   const pAd=await obterPrecoServico('somente_audiodescritor',moeda);
   const valorHoraAd=pAd?numeroSeguro(pAd.valor_hora,pAd.valor_base_10_ouvintes_1_hora):0;
   const valorAd=arredondarValor(valorHoraAd*duracao);
-  return {valor_original:arredondarValor(pacoteAud.valor_original+valorAd),ouvintes:pacoteAud.ouvintes,duracao_horas:pacoteAud.duracao_horas,tipo_servico:tipo,detalhes:{descricao:'Serviço completo - Audesc + audiodescritor',valor_audesc:pacoteAud.valor_original,valor_audiodescritor:valorAd,valor_hora_audiodescritor:valorHoraAd}};
+  return {valor_original:arredondarValor(pacoteAud.valor_original+valorAd),ouvintes:pacoteAud.ouvintes,duracao_horas:pacoteAud.duracao_horas,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_audesc:pacoteAud.valor_original,valor_audiodescritor:valorAd,valor_hora_audiodescritor:valorHoraAd}};
  }
  return null;
+}
+
+
+function valorNumericoOuNull(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? arredondarValor(n) : null;
+}
+
+async function calcularValorSugeridoAgenda(ev){
+  const moeda = moedaDoEvento(ev);
+  const pacote = await calcularValorBaseServico(ev, moeda);
+  if(!pacote) return { moeda, valor_sugerido_agenda: 0, pacote: null };
+  return { moeda, valor_sugerido_agenda: arredondarValor(pacote.valor_original), pacote };
+}
+
+function aplicarValorFinalAgendaSeExistir(ev, pacote){
+  if(!requerAgendaProfissional(ev)) return pacote;
+  const valorFinalAgenda = valorNumericoOuNull(ev.valor_final_agenda);
+  if(valorFinalAgenda === null) return pacote;
+  return Object.assign({}, pacote, {
+    valor_original: valorFinalAgenda,
+    valor_final_agenda: valorFinalAgenda,
+    valor_sugerido_agenda: valorNumericoOuNull(ev.valor_sugerido_agenda),
+    detalhes: Object.assign({}, pacote.detalhes || {}, {
+      valor_sugerido_agenda: valorNumericoOuNull(ev.valor_sugerido_agenda),
+      valor_final_definido_pelo_admin: valorFinalAgenda,
+      valor_base_original_calculado: pacote.valor_original
+    })
+  });
 }
 
 async function calcularPagamentoEvento(ev, codigoCupom){
@@ -178,6 +547,7 @@ async function calcularPagamentoEvento(ev, codigoCupom){
     const precificacao = await obterPrecificacao(moeda, ev.tipo_servico);
     pacote = calcularValorPacote(ev, precificacao);
   }
+  pacote = aplicarValorFinalAgendaSeExistir(ev, pacote);
 
   let cupom = null;
   let desconto = 0;
@@ -274,16 +644,419 @@ async function emailConfiavel(email){
 }
 
 
+
+function base64UrlEncode(input){
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input));
+  return buf.toString('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+}
+function assinarJwtHs256(payload, secret){
+  const header = { alg:'HS256', typ:'JWT' };
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signature = crypto.createHmac('sha256', secret).update(encodedHeader + '.' + encodedPayload).digest();
+  return encodedHeader + '.' + encodedPayload + '.' + base64UrlEncode(signature);
+}
+
+
+function normalizarCodigoSalaBusca(v){
+  return String(v || '').trim();
+}
+
+async function buscarEventoPorSala(sb, sala, campos){
+  const codigo = normalizarCodigoSalaBusca(sala);
+  if(!codigo) return null;
+  const selectCampos = campos || 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao';
+
+  async function tentarEq(valor){
+    const {data,error}=await sb.from('eventos').select(selectCampos).eq('sala_codigo', valor).limit(1);
+    if(error) throw error;
+    return data && data.length ? data[0] : null;
+  }
+
+  async function tentarIlike(valor){
+    const seguro = String(valor).replace(/[%_]/g, '\\$&');
+    const {data,error}=await sb.from('eventos').select(selectCampos).ilike('sala_codigo', seguro).limit(1);
+    if(error) throw error;
+    return data && data.length ? data[0] : null;
+  }
+
+  const candidatos = Array.from(new Set([codigo, decodeURIComponent(codigo)].filter(Boolean)));
+  for(const c of candidatos){
+    const exato = await tentarEq(c);
+    if(exato) return exato;
+  }
+  for(const c of candidatos){
+    const aproximado = await tentarIlike(c);
+    if(aproximado) return aproximado;
+  }
+
+  // Compatibilidade extra: alguns códigos podem ter diferenças de espaço, maiúsculas/minúsculas ou caracteres invisíveis.
+  const alvo = codigo.toLowerCase().replace(/\s+/g,'');
+  const {data,error}=await sb.from('eventos').select(selectCampos).not('sala_codigo','is',null).order('created_at',{ascending:false}).limit(500);
+  if(error) throw error;
+  return (data || []).find(ev => String(ev.sala_codigo || '').trim().toLowerCase().replace(/\s+/g,'') === alvo) || null;
+}
+
+
+
+function normalizarCabecalhoPlanilha(v){
+  return String(v || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g,'_')
+    .replace(/^_+|_+$/g,'');
+}
+function celulaIgualCodigo(a,b){
+  return String(a || '').trim().toLowerCase().replace(/\s+/g,'') === String(b || '').trim().toLowerCase().replace(/\s+/g,'');
+}
+
+function numeroOuNull(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function gpsConfigEvento(ev){
+  const exigir = ev && (ev.exigir_gps_ouvintes === true || String(ev.exigir_gps_ouvintes || '').toLowerCase() === 'true');
+  const lat = numeroOuNull(ev && ev.latitude);
+  const lon = numeroOuNull(ev && ev.longitude);
+  const raio = Math.max(10, Math.min(5000, Math.floor(Number((ev && ev.gps_raio_metros) || 200))));
+  const precisaoMax = Math.max(10, Math.min(5000, Math.floor(Number((ev && ev.gps_precisao_max_metros) || 500))));
+  return {exigir, latitude:lat, longitude:lon, raio_metros:raio, precisao_max_metros:precisaoMax, configurado: exigir && lat !== null && lon !== null};
+}
+function distanciaMetros(lat1, lon1, lat2, lon2){
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const p1 = toRad(lat1), p2 = toRad(lat2);
+  const dp = toRad(lat2 - lat1);
+  const dl = toRad(lon2 - lon1);
+  const a = Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+function validarGpsOuvinte(ev, query){
+  const cfg = gpsConfigEvento(ev);
+  if(!cfg.exigir) return {ok:true, exigido:false, config:cfg};
+  if(!cfg.configurado){
+    return {ok:false, exigido:true, config:cfg, error:'Este evento exige presença no local, mas as coordenadas do evento não estão configuradas.'};
+  }
+  const lat = numeroOuNull(query.lat || query.latitude);
+  const lon = numeroOuNull(query.lon || query.lng || query.longitude);
+  const acc = Math.max(0, Number(query.accuracy || query.precisao || 0));
+  if(lat === null || lon === null){
+    return {ok:false, exigido:true, config:cfg, error:'Para entrar nesta transmissão, permita o acesso à localização do dispositivo.'};
+  }
+  if(acc && acc > cfg.precisao_max_metros){
+    return {ok:false, exigido:true, config:cfg, distancia_metros:null, precisao_metros:acc, error:`A localização informada está imprecisa demais (${Math.round(acc)} m). Tente novamente em local aberto ou mais próximo do evento.`};
+  }
+  const dist = distanciaMetros(cfg.latitude, cfg.longitude, lat, lon);
+  // Considera a margem de precisão do GPS a favor do ouvinte para evitar bloqueios injustos.
+  const distanciaAjustada = Math.max(0, dist - (Number.isFinite(acc) ? acc : 0));
+  if(distanciaAjustada > cfg.raio_metros){
+    return {ok:false, exigido:true, config:cfg, distancia_metros:Math.round(dist), distancia_ajustada_metros:Math.round(distanciaAjustada), precisao_metros:acc||null, error:'A transmissão está restrita a ouvintes presentes no local do evento.'};
+  }
+  return {ok:true, exigido:true, config:cfg, distancia_metros:Math.round(dist), distancia_ajustada_metros:Math.round(distanciaAjustada), precisao_metros:acc||null};
+}
+function indicePorCabecalho(headers, nomes){
+  const alvos = nomes.map(normalizarCabecalhoPlanilha);
+  for(let i=0;i<headers.length;i++){
+    const h = normalizarCabecalhoPlanilha(headers[i]);
+    if(alvos.includes(h)) return i;
+  }
+  for(let i=0;i<headers.length;i++){
+    const h = normalizarCabecalhoPlanilha(headers[i]);
+    if(alvos.some(a => h.includes(a) || a.includes(h))) return i;
+  }
+  return -1;
+}
+function valorLinhaPorIndices(row, indices){
+  for(const idx of indices){
+    if(idx >= 0 && row[idx] !== undefined && String(row[idx]).trim()) return String(row[idx]).trim();
+  }
+  return '';
+}
+
+async function buscarSalaNaPlanilha(sala, password){
+  const codigo = normalizarCodigoSalaBusca(sala);
+  if(!codigo) return null;
+  try{
+    const sheets = await getSheets();
+    const resp = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${SHEET_NAME}!A:Z`
+    });
+    const rows = resp.data && resp.data.values ? resp.data.values : [];
+    if(!rows.length) return null;
+
+    const headers = rows[0] || [];
+    const idxSala = indicePorCabecalho(headers, [
+      'sala','codigo_sala','codigo da sala','código da sala','sala_codigo','codigo','código','room','room_code','roomcode'
+    ]);
+    const idxSenha = indicePorCabecalho(headers, [
+      'senha','senha_transmissor','senha do transmissor','senha de transmissor','password','transmitter_password'
+    ]);
+    const idxTitulo = indicePorCabecalho(headers, [
+      'evento','titulo','título','nome_evento','nome do evento','titulo_publicado','title'
+    ]);
+    const idxMax = indicePorCabecalho(headers, [
+      'max_ouvintes','max ouvintes','numero_maximo_ouvintes','número máximo de ouvintes','ouvintes','maximo ouvintes'
+    ]);
+    const idxDuracao = indicePorCabecalho(headers, [
+      'duracao','duração','duracao_horas','duração horas','horas','duration'
+    ]);
+    const idxData = indicePorCabecalho(headers, [
+      'data','data_evento','data e hora','inicio','início','start','start_time'
+    ]);
+    const idxStatus = indicePorCabecalho(headers, [
+      'status','ativo','liberado','publicado','status_operacao','status_publicacao'
+    ]);
+
+    const linhas = rows.slice(1);
+    const possivelCabecalho = headers.some(h => normalizarCabecalhoPlanilha(h).includes('sala') || normalizarCabecalhoPlanilha(h).includes('senha'));
+    const linhasParaBuscar = possivelCabecalho ? linhas : rows;
+
+    for(let i=0;i<linhasParaBuscar.length;i++){
+      const row = linhasParaBuscar[i] || [];
+      let indiceSalaEncontrada = -1;
+      let salaPlanilha = '';
+
+      if(idxSala >= 0 && celulaIgualCodigo(row[idxSala], codigo)){
+        indiceSalaEncontrada = idxSala;
+        salaPlanilha = String(row[idxSala] || '').trim();
+      }else{
+        for(let c=0;c<row.length;c++){
+          if(celulaIgualCodigo(row[c], codigo)){
+            indiceSalaEncontrada = c;
+            salaPlanilha = String(row[c] || '').trim();
+            break;
+          }
+        }
+      }
+      if(indiceSalaEncontrada < 0 || !salaPlanilha) continue;
+
+      const statusPlanilha = idxStatus >= 0 ? String(row[idxStatus] || '').trim().toLowerCase() : '';
+      // Se houver uma coluna de status reconhecida, bloqueia apenas status claramente negativos.
+      if(statusPlanilha && ['cancelado','cancelada','inativo','inativa','bloqueado','bloqueada','encerrado','encerrada','negado','negada'].includes(statusPlanilha)){
+        continue;
+      }
+
+      let senha = valorLinhaPorIndices(row, [idxSenha, 0]);
+      // Compatibilidade com planilhas antigas: quando a sala está em B, a senha costuma estar em A; quando a sala estiver em outra coluna, tenta a célula anterior.
+      if(!senha && indiceSalaEncontrada > 0) senha = String(row[indiceSalaEncontrada - 1] || '').trim();
+      if(!senha && password){
+        const senhaEncontradaNaLinha = row.find(c => celulaIgualCodigo(c, password));
+        if(senhaEncontradaNaLinha) senha = String(senhaEncontradaNaLinha).trim();
+      }
+
+      return {
+        id: `planilha-${i+1}`,
+        origem: 'google_sheets',
+        titulo_original: valorLinhaPorIndices(row, [idxTitulo, 2]) || 'Evento Audesc',
+        titulo_publicado: valorLinhaPorIndices(row, [idxTitulo, 2]) || 'Evento Audesc',
+        sala_codigo: salaPlanilha,
+        senha_transmissor: senha,
+        status_operacao: 'liberado',
+        status_publicacao: 'aprovado',
+        max_ouvintes: Number(valorLinhaPorIndices(row, [idxMax, 3]) || 0) || null,
+        duracao_horas: Number(valorLinhaPorIndices(row, [idxDuracao, 4]) || 0) || null,
+        data_evento: valorLinhaPorIndices(row, [idxData, 5]) || null,
+        exigir_gps_ouvintes: false,
+        gps_raio_metros: null,
+        gps_precisao_max_metros: null,
+        latitude: null,
+        longitude: null
+      };
+    }
+  }catch(e){
+    console.warn('Fallback Google Sheets para sala falhou:', e && e.message ? e.message : e);
+  }
+  return null;
+}
+
+async function buscarEventoOuPlanilhaPorSala(sb, sala, campos, opts){
+  const ev = await buscarEventoPorSala(sb, sala, campos);
+  if(ev) return ev;
+  return await buscarSalaNaPlanilha(sala, opts && opts.password);
+}
+
+function senhaAdminValida(password){
+  const senha = String(password || '').trim();
+  const senhasAdmin = [process.env.ADMIN_TRANSMITTER_PASSWORD, ADMIN_TOKEN].filter(Boolean).map(v => String(v).trim()).filter(Boolean);
+  return !!senha && senhasAdmin.includes(senha);
+}
+
+function normalizarRoleToken(role){
+  const r = String(role || '').toLowerCase();
+  if(['transmitter','transmissor','publisher'].includes(r)) return 'transmitter';
+  return 'receiver';
+}
+function normalizarIdentityToken(identity, role){
+  const fallback = role === 'transmitter' ? 'Transmissor' : 'Ouvinte';
+  return limit(identity || fallback, 80) || fallback;
+}
+function gerarLiveKitToken({room, identity, role}){
+  const apiKey = process.env.LIVEKIT_API_KEY || process.env.LIVEKIT_KEY || '';
+  const apiSecret = process.env.LIVEKIT_API_SECRET || process.env.LIVEKIT_SECRET || '';
+  if(!apiKey || !apiSecret){
+    throw new Error('Credenciais do LiveKit não configuradas no audesc-events-api. Configure LIVEKIT_API_KEY e LIVEKIT_API_SECRET no Render.');
+  }
+  const agora = Math.floor(Date.now() / 1000);
+  const canPublish = role === 'transmitter';
+  const payload = {
+    iss: apiKey,
+    sub: identity,
+    nbf: agora - 10,
+    exp: agora + 6 * 60 * 60,
+    video: {
+      roomJoin: true,
+      room,
+      canPublish,
+      canSubscribe: true,
+      canPublishData: true,
+      canUpdateOwnMetadata: true
+    }
+  };
+  return assinarJwtHs256(payload, apiSecret);
+}
+
 function admin(req,res){ const t=req.headers['x-admin-token']||req.query.admin_token; if(!ADMIN_TOKEN || t!==ADMIN_TOKEN){res.status(403).json({error:'Acesso administrativo não autorizado.'}); return false;} return true; }
 
 
+
 function normalizarBuscaLocal(v){
-  return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+  return String(v||'')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase()
+    .replace(/[\u2019']/g,'')
+    .replace(/[^a-z0-9]+/g,' ')
+    .trim();
 }
+function normalizarChaveLocal(v){ return normalizarBuscaLocal(v).replace(/\s+/g,''); }
+function carregarAliasesLocalizacao(){
+  const basico={
+    countries:{
+      BR:['Brasil','Brazil'],PT:['Portugal'],AO:['Angola'],MZ:['Moçambique','Mocambique','Mozambique'],CV:['Cabo Verde','Cape Verde'],GW:['Guiné-Bissau','Guine-Bissau','Guinea-Bissau'],GQ:['Guiné Equatorial','Guine Equatorial','Equatorial Guinea'],ST:['São Tomé e Príncipe','Sao Tome e Principe','São Tomé and Príncipe','Sao Tome and Principe'],TL:['Timor-Leste','Timor Leste','East Timor']
+    },
+    units:{
+      BR:{
+        AC:['Acre'],AL:['Alagoas'],AP:['Amapá','Amapa'],AM:['Amazonas'],BA:['Bahia'],CE:['Ceará','Ceara'],DF:['Distrito Federal','Brasília','Brasilia','Taguatinga'],ES:['Espírito Santo','Espirito Santo'],GO:['Goiás','Goias'],MA:['Maranhão','Maranhao'],MT:['Mato Grosso'],MS:['Mato Grosso do Sul'],MG:['Minas Gerais'],PA:['Pará','Para'],PB:['Paraíba','Paraiba'],PR:['Paraná','Parana'],PE:['Pernambuco'],PI:['Piauí','Piaui'],RJ:['Rio de Janeiro'],RN:['Rio Grande do Norte'],RS:['Rio Grande do Sul'],RO:['Rondônia','Rondonia'],RR:['Roraima'],SC:['Santa Catarina'],SP:['São Paulo','Sao Paulo'],SE:['Sergipe'],TO:['Tocantins']
+      },
+      PT:{LIS:['Lisboa','Lisbon'],POR:['Porto','Oporto'],AVE:['Aveiro'],BEJ:['Beja'],BRA:['Braga'],BGC:['Bragança','Braganca'],CTB:['Castelo Branco'],CBR:['Coimbra'],EVR:['Évora','Evora'],FAR:['Faro'],GUA:['Guarda'],LEI:['Leiria'],PTG:['Portalegre'],STR:['Santarém','Santarem'],SET:['Setúbal','Setubal'],VCT:['Viana do Castelo'],VRL:['Vila Real'],VIS:['Viseu'],ACO:['Açores','Azores'],MAD:['Madeira']},
+      AO:{LUA:['Luanda'],BGO:['Bengo'],BGU:['Benguela'],BIE:['Bié','Bie'],CAB:['Cabinda'],CCU:['Cuando Cubango'],CNO:['Cuanza Norte','Kwanza Norte'],CUS:['Cuanza Sul','Kwanza Sul'],CNN:['Cunene'],HUA:['Huambo'],HUI:['Huíla','Huila'],LNO:['Lunda Norte'],LSU:['Lunda Sul'],MAL:['Malanje'],MOX:['Moxico'],NAM:['Namibe'],UIG:['Uíge','Uige'],ZAI:['Zaire']},
+      MZ:{MPM:['Maputo Cidade','Maputo City','Cidade de Maputo'],MAP:['Maputo'],CD:['Cabo Delgado'],GZ:['Gaza'],IN:['Inhambane'],MN:['Manica'],NA:['Nampula'],NI:['Niassa'],SO:['Sofala'],TE:['Tete'],ZA:['Zambézia','Zambezia']},
+      CV:{BV:['Boa Vista'],BR:['Brava'],FG:['Fogo'],MA:['Maio'],SL:['Sal'],ST:['Santiago'],SA:['Santo Antão','Santo Antao'],SN:['São Nicolau','Sao Nicolau'],SV:['São Vicente','Sao Vicente']},
+      GW:{BA:['Bafatá','Bafata'],BI:['Biombo'],BL:['Bolama/Bijagós','Bolama Bijagos'],CA:['Cacheu'],GA:['Gabú','Gabu'],OI:['Oio'],QU:['Quinara'],TO:['Tombali'],BS:['Setor Autônomo de Bissau','Sector Autónomo de Bissau','Bissau']},
+      GQ:{AN:['Annobón','Annobon'],BN:['Bioko Norte'],BS:['Bioko Sul'],CS:['Centro Sul'],DJ:['Djibloho'],KN:['Kie-Ntem'],LI:['Litoral'],WN:['Wele-Nzas']},
+      ST:{AG:['Água Grande','Agua Grande'],CA:['Cantagalo'],CU:['Caué','Caue'],LE:['Lembá','Lemba'],LO:['Lobata'],MZ:['Mé-Zóchi','Me-Zochi'],PR:['Região Autônoma do Príncipe','Regiao Autonoma do Principe','Príncipe','Principe']},
+      TL:{AL:['Aileu'],AN:['Ainaro'],AT:['Ataúro','Atauro'],BA:['Baucau'],BO:['Bobonaro'],CO:['Covalima'],DI:['Díli','Dili'],ER:['Ermera'],LA:['Lautém','Lautem'],LI:['Liquiçá','Liquica'],MT:['Manatuto'],MF:['Manufahi'],OE:['Oecusse','Oecussi'],VI:['Viqueque']}
+    }
+  };
+  try{
+    const file=path.join(__dirname,'data','location-aliases.json');
+    if(fs.existsSync(file)){
+      const extra=JSON.parse(fs.readFileSync(file,'utf8'));
+      return {
+        countries:{...(basico.countries||{}),...(extra.countries||{})},
+        units:{...(basico.units||{}),...(extra.units||{})}
+      };
+    }
+  }catch(e){ console.warn('Não foi possível carregar aliases de localização:', e.message); }
+  return basico;
+}
+const LOCATION_ALIASES=carregarAliasesLocalizacao();
 function codigoPaisMaps(pais){
-  const mapa={'brasil':'BR','portugal':'PT','angola':'AO','mocambique':'MZ','moçambique':'MZ','cabo verde':'CV','guine-bissau':'GW','guiné-bissau':'GW','guine equatorial':'GQ','guiné equatorial':'GQ','sao tome e principe':'ST','são tomé e príncipe':'ST','timor-leste':'TL'};
-  return mapa[normalizarBuscaLocal(pais)] || '';
+  const alvo=normalizarChaveLocal(pais);
+  if(!alvo) return '';
+  for(const [codigo, nomes] of Object.entries(LOCATION_ALIASES.countries||{})){
+    if(normalizarChaveLocal(codigo)===alvo || (nomes||[]).some(n=>normalizarChaveLocal(n)===alvo)) return codigo.toUpperCase();
+  }
+  return String(pais||'').trim().length===2 ? String(pais).trim().toUpperCase() : '';
 }
+
+
+const TIMEZONE_POR_PAIS = {
+  BR: 'America/Sao_Paulo',
+  PT: 'Europe/Lisbon',
+  AO: 'Africa/Luanda',
+  MZ: 'Africa/Maputo',
+  CV: 'Atlantic/Cape_Verde',
+  GW: 'Africa/Bissau',
+  GQ: 'Africa/Malabo',
+  ST: 'Africa/Sao_Tome',
+  TL: 'Asia/Dili'
+};
+const TIMEZONE_POR_UNIDADE = {
+  BR: {
+    AC:'America/Rio_Branco',
+    AM:'America/Manaus',
+    RO:'America/Porto_Velho',
+    RR:'America/Boa_Vista',
+    MT:'America/Cuiaba',
+    MS:'America/Campo_Grande',
+    DF:'America/Sao_Paulo'
+  },
+  PT: { ACO:'Atlantic/Azores', MAD:'Europe/Lisbon' }
+};
+function timezoneValido(tz){
+  try{ new Intl.DateTimeFormat('en-US',{timeZone:tz}).format(new Date()); return true; }catch(e){ return false; }
+}
+function timezonePorLocal(paisCodigo, unidadeCodigo, paisNome){
+  const p = String(paisCodigo || codigoPaisMaps(paisNome) || '').toUpperCase();
+  const u = String(unidadeCodigo || '').toUpperCase();
+  const tz = (TIMEZONE_POR_UNIDADE[p] && TIMEZONE_POR_UNIDADE[p][u]) || TIMEZONE_POR_PAIS[p] || 'America/Sao_Paulo';
+  return timezoneValido(tz) ? tz : 'America/Sao_Paulo';
+}
+function offsetTimezoneMs(date, timeZone){
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', second:'2-digit',
+    hour12:false
+  });
+  const parts = Object.fromEntries(dtf.formatToParts(date).filter(p=>p.type!=='literal').map(p=>[p.type,p.value]));
+  const asUTC = Date.UTC(Number(parts.year), Number(parts.month)-1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+  return asUTC - date.getTime();
+}
+function localDateTimeToUTCISO(localValue, timeZone){
+  const raw = String(localValue || '').trim();
+  if(!raw) return null;
+  if(/[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw)){
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if(!m){
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  const y=Number(m[1]), mo=Number(m[2]), da=Number(m[3]), h=Number(m[4]), mi=Number(m[5]), se=Number(m[6]||0);
+  const tz = timezoneValido(timeZone) ? timeZone : 'America/Sao_Paulo';
+  let utcMs = Date.UTC(y, mo-1, da, h, mi, se);
+  for(let i=0;i<3;i++) utcMs = Date.UTC(y, mo-1, da, h, mi, se) - offsetTimezoneMs(new Date(utcMs), tz);
+  return new Date(utcMs).toISOString();
+}
+function prepararDataEvento(valor, timezone){
+  const iso = localDateTimeToUTCISO(valor, timezone);
+  return iso || null;
+}
+
+function aliasesPais(codigo){ return [codigo, ...((LOCATION_ALIASES.countries||{})[codigo]||[])].filter(Boolean); }
+function codigoUnidadeLocal(paisCodigo, unidade, unidadeTexto){
+  const alvo=[unidade,unidadeTexto].map(normalizarChaveLocal).filter(Boolean);
+  const units=(LOCATION_ALIASES.units||{})[paisCodigo]||{};
+  for(const [codigo, nomes] of Object.entries(units)){
+    const cand=[codigo, ...(nomes||[])].map(normalizarChaveLocal);
+    if(alvo.some(a=>cand.includes(a))) return codigo.toUpperCase();
+  }
+  const bruto=String(unidade||unidadeTexto||'').trim();
+  if(bruto && bruto.length<=6) return bruto.toUpperCase();
+  return '';
+}
+function aliasesUnidade(paisCodigo, unidadeCodigo, unidadeTexto){
+  const units=(LOCATION_ALIASES.units||{})[paisCodigo]||{};
+  const nomes=[unidadeCodigo, unidadeTexto, ...(units[unidadeCodigo]||[])].filter(Boolean);
+  return [...new Set(nomes.map(String))];
+}
+function componenteTexto(comp){ return comp?.shortText || comp?.longText || comp?.short_name || comp?.long_name || ''; }
 function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
   const q=text(query);
   const p=text(pais);
@@ -291,6 +1064,7 @@ function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
   const variantes=[];
   function add(v){ v=text(v); if(v && !variantes.some(x=>normalizarBuscaLocal(x)===normalizarBuscaLocal(v))) variantes.push(v); }
   if(u && p) add(`${q}, ${u}, ${p}`);
+  if(uf && uf!==ufTexto && p) add(`${q}, ${uf}, ${p}`);
   if(p) add(`${q}, ${p}`);
   add(q);
   const nq=normalizarBuscaLocal(q);
@@ -300,50 +1074,69 @@ function montarVariantesConsultaLocal(query, pais, uf, ufTexto){
     if(p) add(`${expandida}, ${p}`);
     add(expandida);
     if(u && p) add(`Memorial do Ministério Público Federal, ${u}, ${p}`);
-    if(u && p) add(`Procuradoria-Geral da República, ${u}, ${p}`);
+    if(u && p) add(`Memorial do MPF, Brasília, ${u}, ${p}`);
+    if(u && p) add(`Memorial do Ministério Público Federal, Procuradoria-Geral da República, Brasília, ${u}, ${p}`);
+    if(u && p) add(`Procuradoria-Geral da República, SAF Sul Quadra 4, Brasília, ${u}, ${p}`);
+    if(u && p) add(`Ministério Público Federal, SAF Sul Quadra 4, Brasília, ${u}, ${p}`);
   }
   if(nq.includes('dorina') || nq.includes('biblioteca braille')){
     if(u && p) add(`Biblioteca Braille Dorina Nowill, Taguatinga, ${u}, ${p}`);
+    if(u && p) add(`Biblioteca Pública Braille Dorina Nowill, Taguatinga, ${u}, ${p}`);
+    if(u && p) add(`Biblioteca Dorina Nowill, Taguatinga, Brasília, ${u}, ${p}`);
     if(p) add(`Biblioteca Braille Dorina Nowill, Taguatinga, ${p}`);
   }
-  return variantes.slice(0,8);
+  return variantes.slice(0,16);
+}
+function textoCorrespondeAlias(texto, aliases){
+  const nt=normalizarBuscaLocal(texto);
+  const kt=normalizarChaveLocal(texto);
+  if(!nt) return false;
+  return (aliases||[]).some(alias=>{
+    const na=normalizarBuscaLocal(alias);
+    const ka=normalizarChaveLocal(alias);
+    return na && (nt===na || kt===ka || nt.includes(na) || na.includes(nt));
+  });
+}
+function paisResultadoValido(textos, ctx){
+  if(!ctx.codigoPais) return true;
+  const aliases=aliasesPais(ctx.codigoPais);
+  return textos.some(t=>String(t||'').toUpperCase()===ctx.codigoPais || textoCorrespondeAlias(t, aliases));
+}
+function unidadeResultadoValida(textos, ctx){
+  if(!ctx.unidadeCodigo || !ctx.uf || ctx.uf==='Nacional') return true;
+  const aliases=aliasesUnidade(ctx.codigoPais, ctx.unidadeCodigo, ctx.ufTexto || ctx.uf);
+  return textos.some(t=>String(t||'').toUpperCase()===ctx.unidadeCodigo || textoCorrespondeAlias(t, aliases));
 }
 function resultadoNominatimDentro(info, ctx){
   const a=info.address||{};
-  if(ctx.codigoPais && String(a.country_code||'').toUpperCase()!==ctx.codigoPais) return false;
-  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
-    const cod=(a.state_code || (a['ISO3166-2-lvl4']||'').split('-').pop() || '').toUpperCase();
-    if(cod && cod!==String(ctx.uf).toUpperCase()) return false;
-    const estado=normalizarBuscaLocal(a.state || a.region || '');
-    const esperado=normalizarBuscaLocal(ctx.ufTexto);
-    if(!cod && esperado && estado && estado!==esperado) return false;
-  }
+  const countryTexts=[a.country_code, a.country, info.display_name];
+  if(!paisResultadoValido(countryTexts,ctx)) return false;
+  const unitTexts=[a.state_code, (a['ISO3166-2-lvl4']||'').split('-').pop(), a.state, a.region, a.city, a.town, a.county, info.display_name].filter(Boolean);
+  if(!unidadeResultadoValida(unitTexts,ctx)) return false;
   return true;
 }
 function resultadoGoogleDentro(item, ctx){
   const comps=item.address_components||[];
-  if(ctx.codigoPais){
-    const c=comps.find(x=>(x.types||[]).includes('country'));
-    if(c && String(c.short_name||'').toUpperCase()!==ctx.codigoPais) return false;
+  const c=comps.find(x=>(x.types||[]).includes('country'));
+  if(!paisResultadoValido([c?.short_name,c?.long_name,item.formatted_address],ctx)) return false;
+  const unitTexts=[item.formatted_address];
+  for(const comp of comps){
+    const tipos=comp.types||[];
+    if(tipos.includes('administrative_area_level_1')||tipos.includes('administrative_area_level_2')||tipos.includes('locality')||tipos.includes('sublocality')||tipos.includes('postal_town')) unitTexts.push(comp.short_name, comp.long_name);
   }
-  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
-    const adm=comps.find(x=>(x.types||[]).includes('administrative_area_level_1'));
-    if(adm && adm.short_name && String(adm.short_name).toUpperCase()!==String(ctx.uf).toUpperCase()) return false;
-  }
+  if(!unidadeResultadoValida(unitTexts,ctx)) return false;
   return true;
 }
 function resultadoGoogleNovoDentro(item, ctx){
   const comps=item.addressComponents||item.address_components||[];
-  if(ctx.codigoPais){
-    const c=comps.find(x=>(x.types||[]).includes('country'));
-    const shortName=c?.shortText || c?.short_name || '';
-    if(shortName && String(shortName).toUpperCase()!==ctx.codigoPais) return false;
+  const c=comps.find(x=>(x.types||[]).includes('country'));
+  if(!paisResultadoValido([componenteTexto(c), item.formattedAddress],ctx)) return false;
+  const unitTexts=[item.formattedAddress];
+  for(const comp of comps){
+    const tipos=comp.types||[];
+    if(tipos.includes('administrative_area_level_1')||tipos.includes('administrative_area_level_2')||tipos.includes('locality')||tipos.includes('sublocality')||tipos.includes('postal_town')) unitTexts.push(comp.shortText, comp.longText);
   }
-  if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional'){
-    const adm=comps.find(x=>(x.types||[]).includes('administrative_area_level_1'));
-    const shortName=adm?.shortText || adm?.short_name || '';
-    if(shortName && String(shortName).toUpperCase()!==String(ctx.uf).toUpperCase()) return false;
-  }
+  if(!unidadeResultadoValida(unitTexts,ctx)) return false;
   return true;
 }
 async function geocodeGooglePlacesNovo(query, ctx){
@@ -368,14 +1161,7 @@ async function geocodeGooglePlacesNovo(query, ctx){
       if(!resultadoGoogleNovoDentro(item, ctx)) continue;
       const loc=item.location||{};
       if(Number.isFinite(Number(loc.latitude)) && Number.isFinite(Number(loc.longitude))){
-        return {
-          lat:Number(loc.latitude),
-          lon:Number(loc.longitude),
-          nome:item.displayName?.text||consulta,
-          endereco:item.formattedAddress||'',
-          provedor:'google_places_new',
-          consulta
-        };
+        return {lat:Number(loc.latitude),lon:Number(loc.longitude),nome:item.displayName?.text||consulta,endereco:item.formattedAddress||'',provedor:'google_places_new',consulta,pais_codigo:ctx.codigoPais||'',unidade_codigo:ctx.unidadeCodigo||''};
       }
     }
   }
@@ -390,7 +1176,7 @@ async function geocodeGoogle(query, ctx){
   for(const consulta of variantes){
     const comps=[];
     if(ctx.codigoPais) comps.push('country:'+ctx.codigoPais);
-    if(normalizarBuscaLocal(ctx.pais)==='brasil' && ctx.uf && ctx.uf!=='Nacional') comps.push('administrative_area:'+ctx.uf);
+    if(ctx.unidadeCodigo && ctx.uf && ctx.uf!=='Nacional') comps.push('administrative_area:'+(ctx.ufTexto || ctx.uf));
     const geocodeUrl='https://maps.googleapis.com/maps/api/geocode/json?address='+encodeURIComponent(consulta)+'&language=pt-BR'+(comps.length?'&components='+encodeURIComponent(comps.join('|')):'')+'&key='+encodeURIComponent(GOOGLE_MAPS_API_KEY);
     const gr=await fetch(geocodeUrl);
     if(gr.ok){
@@ -399,9 +1185,7 @@ async function geocodeGoogle(query, ctx){
       for(const item of lista.slice(0,5)){
         if(!resultadoGoogleDentro(item, ctx)) continue;
         const loc=item.geometry?.location;
-        if(loc && Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lng))){
-          candidates.push({lat:Number(loc.lat),lon:Number(loc.lng),nome:item.formatted_address||consulta,endereco:item.formatted_address||'',provedor:'google_geocoding',consulta});
-        }
+        if(loc && Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lng))) candidates.push({lat:Number(loc.lat),lon:Number(loc.lng),nome:item.formatted_address||consulta,endereco:item.formatted_address||'',provedor:'google_geocoding',consulta,pais_codigo:ctx.codigoPais||'',unidade_codigo:ctx.unidadeCodigo||''});
       }
     }
     if(candidates.length) return candidates[0];
@@ -417,77 +1201,65 @@ async function geocodeNominatim(query, ctx){
     if(!r.ok) continue;
     const lista=await r.json();
     const valido=(Array.isArray(lista)?lista:[]).find(item=>resultadoNominatimDentro(item,ctx));
-    if(valido) return {lat:Number(valido.lat),lon:Number(valido.lon),nome:valido.name||'',endereco:valido.display_name||'',provedor:'nominatim',consulta};
+    if(valido) return {lat:Number(valido.lat),lon:Number(valido.lon),nome:valido.name||'',endereco:valido.display_name||'',provedor:'nominatim',consulta,pais_codigo:ctx.codigoPais||'',unidade_codigo:ctx.unidadeCodigo||''};
   }
   return null;
 }
 
 
-const placesSuggestionsCache = new Map();
-const PLACES_CACHE_TTL_MS = 5 * 60 * 1000;
-function placesCacheGet(key){
-  const item=placesSuggestionsCache.get(key);
-  if(!item) return null;
-  if(Date.now()-item.time>PLACES_CACHE_TTL_MS){placesSuggestionsCache.delete(key);return null;}
-  return item.value;
-}
-function placesCacheSet(key,value){
-  if(placesSuggestionsCache.size>200){
-    const first=placesSuggestionsCache.keys().next().value;
-    if(first) placesSuggestionsCache.delete(first);
+async function sugerirGooglePlaces(query, ctx){
+  if(!GOOGLE_MAPS_API_KEY) return [];
+  const variantes=montarVariantesConsultaLocal(query, ctx.pais, ctx.uf, ctx.ufTexto).slice(0,4);
+  const resultados=[];
+  const vistos=new Set();
+  for(const consulta of variantes){
+    const body={textQuery:consulta,languageCode:'pt-BR',maxResultCount:8};
+    if(ctx.codigoPais) body.regionCode=ctx.codigoPais;
+    const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
+        'X-Goog-FieldMask':'places.id,places.displayName,places.formattedAddress,places.location,places.addressComponents'
+      },
+      body:JSON.stringify(body)
+    });
+    if(!r.ok) continue;
+    const j=await r.json().catch(()=>({}));
+    for(const item of (Array.isArray(j.places)?j.places:[])){
+      if(!resultadoGoogleNovoDentro(item,ctx)) continue;
+      const loc=item.location||{};
+      const lat=Number(loc.latitude), lon=Number(loc.longitude);
+      if(!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
+      const endereco=String(item.formattedAddress||'').trim();
+      const nome=String(item.displayName?.text||endereco||query).trim();
+      const chave=(item.id||`${lat},${lon}`).toLowerCase();
+      if(vistos.has(chave)) continue;
+      vistos.add(chave);
+      resultados.push({id:item.id||chave,nome,endereco,lat,lon,provedor:'google_places_new'});
+      if(resultados.length>=5) return resultados;
+    }
   }
-  placesSuggestionsCache.set(key,{time:Date.now(),value});
+  return resultados;
 }
-async function buscarSugestoesGooglePlaces(query,ctx){
-  if(!GOOGLE_MAPS_API_KEY) throw new Error('Google Maps não configurado no servidor.');
-  const consulta=montarVariantesConsultaLocal(query,ctx.pais,ctx.uf,ctx.ufTexto)[0]||query;
-  const body={textQuery:consulta,languageCode:'pt-BR',maxResultCount:5};
-  if(ctx.codigoPais) body.regionCode=ctx.codigoPais;
-  const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
-    method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
-      'X-Goog-FieldMask':'places.id,places.displayName,places.formattedAddress,places.location,places.addressComponents'
-    },
-    body:JSON.stringify(body)
-  });
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok){
-    console.error('Erro Google Places sugestões:',j);
-    throw new Error('Não foi possível consultar sugestões de locais.');
-  }
-  return (Array.isArray(j.places)?j.places:[])
-    .filter(item=>resultadoGoogleNovoDentro(item,ctx))
-    .map(item=>({
-      id:item.id||'',
-      nome:item.displayName?.text||'',
-      endereco:item.formattedAddress||item.displayName?.text||'',
-      lat:Number(item.location?.latitude),
-      lon:Number(item.location?.longitude),
-      provedor:'google_places_new'
-    }))
-    .filter(item=>Number.isFinite(item.lat)&&Number.isFinite(item.lon))
-    .slice(0,5);
-}
-app.get('/places/suggestions',async(req,res)=>{
+
+app.get('/geocode/sugestoes', async (req,res)=>{
   try{
-    const q=limit(req.query.q,300);
-    if(q.length<3) return res.json({ok:true,sugestoes:[]});
+    const query=limit(req.query.q,300);
+    if(!query || query.length<3) return res.json({ok:true,resultados:[]});
     const pais=limit(req.query.pais,80);
-    const uf=limit(req.query.uf,30);
+    const uf=limit(req.query.uf,40);
     const ufTexto=limit(req.query.ufTexto,120);
-    const codigoInformado=limit(req.query.paisCodigo,4).toUpperCase();
-    const ctx={pais,uf,ufTexto,codigoPais:codigoInformado||codigoPaisMaps(pais)};
-    const cacheKey=[normalizarBuscaLocal(q),ctx.codigoPais,String(uf).toUpperCase(),normalizarBuscaLocal(ufTexto)].join('|');
-    const cached=placesCacheGet(cacheKey);
-    if(cached) return res.json({ok:true,sugestoes:cached,cache:true});
-    const sugestoes=await buscarSugestoesGooglePlaces(q,ctx);
-    placesCacheSet(cacheKey,sugestoes);
-    return res.json({ok:true,sugestoes});
+    const codigoPaisInformado=limit(req.query.paisCodigo,10);
+    const codigoUnidadeInformado=limit(req.query.unidadeCodigo,20);
+    const codigoPais=(codigoPaisInformado || codigoPaisMaps(pais)).toUpperCase();
+    const unidadeCodigo=(codigoUnidadeInformado || codigoUnidadeLocal(codigoPais,uf,ufTexto)).toUpperCase();
+    const ctx={pais,uf,ufTexto,codigoPais,unidadeCodigo};
+    const resultados=await sugerirGooglePlaces(query,ctx);
+    return res.json({ok:true,resultados});
   }catch(e){
-    console.error('Erro em /places/suggestions:',e);
-    return res.status(500).json({error:e.message||'Erro ao buscar sugestões de locais.'});
+    console.error('Erro ao sugerir locais:',e);
+    return res.status(500).json({error:'Erro ao buscar sugestões de locais.'});
   }
 });
 
@@ -496,11 +1268,15 @@ app.get('/geocode', async (req,res)=>{
     const query=limit(req.query.q,300);
     if(!query) return res.status(400).json({error:'Informe o nome ou endereço do local.'});
     const pais=limit(req.query.pais,80);
-    const uf=limit(req.query.uf,20);
+    const uf=limit(req.query.uf,40);
     const ufTexto=limit(req.query.ufTexto,120);
-    const ctx={pais,uf,ufTexto,codigoPais:codigoPaisMaps(pais)};
-    let resultado=await geocodeNominatim(query,ctx);
-    if(!resultado) resultado=await geocodeGoogle(query,ctx);
+    const codigoPaisInformado=limit(req.query.paisCodigo,10);
+    const codigoUnidadeInformado=limit(req.query.unidadeCodigo,20);
+    const codigoPais=(codigoPaisInformado || codigoPaisMaps(pais)).toUpperCase();
+    const unidadeCodigo=(codigoUnidadeInformado || codigoUnidadeLocal(codigoPais, uf, ufTexto)).toUpperCase();
+    const ctx={pais,uf,ufTexto,codigoPais,unidadeCodigo};
+    let resultado=await geocodeGoogle(query,ctx);
+    if(!resultado) resultado=await geocodeNominatim(query,ctx);
     if(!resultado){
       return res.status(404).json({error:'Local não encontrado na região selecionada. Tente informar também bairro, cidade ou endereço completo.'});
     }
@@ -511,12 +1287,12 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v39-autocomplete-localizacao-acessivel'}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v41-servicos-centralizados' }));
 
 
-const SERVICOS_COM_AGENDA = ['audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+const SERVICOS_COM_AGENDA = SERVICOS_CONFIG.filter(s => s.ativo !== false && s.requerAgenda).map(s => s.codigo);
 function requerAgendaProfissional(ev){
-  return SERVICOS_COM_AGENDA.includes(String(ev?.tipo_servico || '').trim());
+  return servicoRequerAgenda(String(ev?.tipo_servico || '').trim());
 }
 function statusAgendaEvento(ev){
   if(!requerAgendaProfissional(ev)) return 'nao_aplicavel';
@@ -533,7 +1309,7 @@ function mensagemAgenda(ev){
 }
 
 async function statusPagamentoInicial(ev){
-  if(String(ev?.tipo_servico || '').trim() === 'divulgacao_gratuita'){
+  if(servicoSomenteDivulgacao(String(ev?.tipo_servico || '').trim())){
     const dados = await calcularPagamentoEvento(ev, '');
     return dados.valor_final > 0 ? 'pendente' : 'dispensado';
   }
@@ -541,7 +1317,7 @@ async function statusPagamentoInicial(ev){
 }
 
 async function sincronizarStatusPagamentoDivulgacao(ev){
-  if(!ev || String(ev.tipo_servico || '').trim() !== 'divulgacao_gratuita') return ev;
+  if(!ev || !servicoSomenteDivulgacao(String(ev.tipo_servico || '').trim())) return ev;
   if(ev.status_pagamento === 'pago') return ev;
   const statusCalculado = await statusPagamentoInicial(ev);
   if(ev.status_pagamento === statusCalculado) return ev;
@@ -573,22 +1349,43 @@ app.post('/criar-evento', async (req,res)=>{
   if(text(b.website)) return res.status(400).json({error:'Solicitação inválida.'});
   if(await emailBloqueado(user.email)) return res.status(403).json({error:'Este e-mail está bloqueado para cadastro de eventos.'});
   const usuarioConfiavel = await emailConfiavel(user.email);
-  const tiposServicoValidos=['audesc_transmissao','divulgacao_gratuita','audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+  const tiposServicoValidos=listarTiposServicoValidos();
   const tipoSolicitado=text(b.tipo_servico);
   const tipo_servico=tiposServicoValidos.includes(tipoSolicitado)?tipoSolicitado:'audesc_transmissao';
   const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
-  const titulo=limit(b.titulo_original,200);
-  if(!titulo) return res.status(400).json({error:'Informe o nome do evento.'});
+  const divulgar_acesso_ouvintes = tipo_evento === 'publico' && (b.divulgar_acesso_ouvintes === true || text(b.divulgar_acesso_ouvintes) === 'true');
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:limit(b.descricao_original,5000),site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais: text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais),
-      uf: (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf),
-      origem_transmissao: text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '',
-      data_evento:b.data_evento||null,duracao_horas,max_ouvintes};
+  const paisEvento = text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais);
+  const ufEvento = (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf);
+  const origemTransmissaoEvento = text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '';
+  const paisReferenciaTimezone = text(b.pais)==='Internacional' ? origemTransmissaoEvento : paisEvento;
+  const paisCodigoEvento = limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisReferenciaTimezone || paisEvento),10);
+  const unidadeCodigoEvento = limit(b.unidade_codigo || b.unidadeCodigo || codigoUnidadeLocal(paisCodigoEvento, ufEvento, b.ufTexto),20);
+  const timezoneCalculadoEvento = timezonePorLocal(paisCodigoEvento, unidadeCodigoEvento, paisReferenciaTimezone || paisEvento);
+  const timezoneEvento = timezoneValido(timezoneCalculadoEvento) ? timezoneCalculadoEvento : (timezoneValido(b.timezone) ? b.timezone : 'America/Sao_Paulo');
+  const dataEventoNormalizada = prepararDataEvento(b.data_evento, timezoneEvento);
+  const formularioCfg = await obterFormularioConfig();
+  const localCfg = resolverFormularioConfigParaLocal(formularioCfg, paisCodigoEvento, unidadeCodigoEvento);
+  if(Array.isArray(localCfg.servicosDisponiveis) && !localCfg.servicosDisponiveis.includes(tipo_servico)){
+    return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
+  }
+  const camposCfg = localCfg.campos || {};
+  const titulo = validarTextoConfigurado(b.titulo_original, 'o nome do evento', localCfg.limites?.titulo_original, true);
+  const descricaoObrigatoria = !!camposCfg.descricao_original?.obrigatorio;
+  const descricaoOriginal = validarTextoConfigurado(b.descricao_original, 'a descrição do evento', localCfg.limites?.descricao_original, descricaoObrigatoria);
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+      uf: ufEvento,
+      origem_transmissao: origemTransmissaoEvento,
+      data_evento:dataEventoNormalizada,duracao_horas,max_ouvintes};
   ev.status_pagamento = await statusPagamentoInicial(ev);
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
-  res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data});
+  const email_publicacao_resultado = await notificarInscritosEventoPublicado({}, data).catch(err => {
+    console.error('Falha ao notificar inscritos no cadastro do evento:', err);
+    return {ok:false,error:String(err && err.message ? err.message : err)};
+  });
+  res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data,email_publicacao_resultado});
  }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao cadastrar evento.'}); }
 });
 
@@ -734,6 +1531,214 @@ async function registrarResultadoEmail(eventoId, resultado){
   }
 }
 
+
+async function enviarEmailResend({to, subject, text: textoEmail, html, tags}){
+  if(!RESEND_API_KEY) return { ok:false, skipped:true, reason:'RESEND_API_KEY ausente' };
+  const destinatarios = Array.isArray(to) ? to.filter(Boolean) : [to].filter(Boolean);
+  if(!destinatarios.length) return { ok:false, skipped:true, reason:'destinatário ausente' };
+  const response = await fetch('https://api.resend.com/emails', {
+    method:'POST',
+    headers:{
+      'Authorization':`Bearer ${RESEND_API_KEY}`,
+      'Content-Type':'application/json'
+    },
+    body:JSON.stringify({
+      from:RESEND_FROM_EMAIL,
+      to:destinatarios,
+      subject,
+      text: textoEmail,
+      html,
+      tags: Array.isArray(tags) ? tags : undefined
+    })
+  });
+  const body=await response.json().catch(()=>({}));
+  if(!response.ok) return { ok:false, status:response.status, error:body };
+  return { ok:true, response:body };
+}
+
+async function registrarEmailEnvio({tipo, evento_id, email_destino, destinatarios, assunto, mensagem, status='enviado', erro=null, response=null}){
+  try{
+    const destino = email_destino ? text(email_destino).toLowerCase() : null;
+    const listaDestinos = Array.isArray(destinatarios) ? destinatarios.map(e=>text(e).toLowerCase()).filter(Boolean) : (destino ? [destino] : []);
+    await getSupabase().from('email_envios').insert({
+      tipo: tipo || 'administrativo',
+      evento_id: evento_id || null,
+      email_destino: destino,
+      destinatarios: listaDestinos,
+      assunto: assunto || '',
+      mensagem: mensagem || '',
+      status,
+      erro: erro ? String(erro).slice(0,2000) : null,
+      response_id: response?.response?.id || response?.id || response?.response?.data?.id || null,
+      enviado_em:new Date().toISOString()
+    });
+  }catch(e){
+    console.warn('Não foi possível registrar envio de e-mail:', e.message || e);
+  }
+}
+
+async function envioJaRegistrado({tipo, evento_id, email_destino}){
+  try{
+    if(!tipo || !evento_id || !email_destino) return false;
+    const {data,error}=await getSupabase().from('email_envios')
+      .select('id')
+      .eq('tipo', tipo)
+      .eq('evento_id', evento_id)
+      .eq('email_destino', String(email_destino).toLowerCase())
+      .limit(1);
+    if(error) throw error;
+    return Array.isArray(data) && data.length > 0;
+  }catch(e){
+    console.warn('Não foi possível verificar histórico de e-mail:', e.message || e);
+    return false;
+  }
+}
+
+function urlPagamentoEvento(ev){
+  return `${AUDESC_WEB_URL.replace(/\/$/,'')}/pagamento.html?evento=${encodeURIComponent(ev.id)}`;
+}
+function urlEventoPublico(ev){
+  return `${AUDESC_WEB_URL.replace(/\/$/,'')}/evento.html?id=${encodeURIComponent(ev.id)}`;
+}
+function formatarMoeda(valor, moeda){
+  const currency = moeda || moedaDoEvento({pais: 'Brasil'});
+  try{return new Intl.NumberFormat('pt-BR',{style:'currency',currency}).format(Number(valor||0));}
+  catch{return `R$ ${Number(valor||0).toFixed(2)}`;}
+}
+function formatarDataEvento(ev){
+  if(!ev?.data_evento) return '';
+  try{return new Date(ev.data_evento).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'});}catch{return String(ev.data_evento);}
+}
+
+function montarEmailAgenda(ev, status){
+  const titulo = ev.titulo_publicado || ev.titulo_original || 'Evento Audesc';
+  const servico = nomeServico(ev.tipo_servico);
+  const obs = text(ev.observacao_agenda);
+  const valor = valorNumericoOuNull(ev.valor_final_agenda);
+  const moeda = ev.moeda_pagamento || moedaDoEvento(ev);
+  const disponivel = status === 'disponivel';
+  const subject = disponivel ? `Audesc: agenda disponível para ${titulo}` : `Audesc: atualização sobre sua solicitação`;
+  const linhas = [];
+  linhas.push('Olá!');
+  linhas.push('');
+  if(disponivel){
+    linhas.push('A disponibilidade de agenda para o serviço solicitado foi confirmada.');
+  }else{
+    linhas.push('No momento, não foi possível confirmar disponibilidade de agenda para o serviço solicitado.');
+  }
+  linhas.push('');
+  linhas.push(`Evento: ${titulo}`);
+  linhas.push(`Serviço: ${servico}`);
+  const dataEv=formatarDataEvento(ev); if(dataEv) linhas.push(`Data e horário: ${dataEv}`);
+  if(disponivel){
+    linhas.push(`Valor final: ${formatarMoeda(valor || 0, moeda)}`);
+    if((valor || 0) > 0) linhas.push(`Link para pagamento: ${urlPagamentoEvento(ev)}`);
+  }
+  if(obs) linhas.push(`Observação: ${obs}`);
+  linhas.push('');
+  linhas.push('Atenciosamente,');
+  linhas.push('Equipe Audesc');
+  const textEmail=linhas.join('\n');
+  const html=`<div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111;">
+    <h1>${disponivel?'Agenda disponível':'Atualização sobre a agenda'}</h1>
+    <p>Olá!</p>
+    <p>${disponivel?'A disponibilidade de agenda para o serviço solicitado foi confirmada.':'No momento, não foi possível confirmar disponibilidade de agenda para o serviço solicitado.'}</p>
+    <h2>Dados do evento</h2>
+    <p><strong>Evento:</strong> ${escapeEmailHtml(titulo)}</p>
+    <p><strong>Serviço:</strong> ${escapeEmailHtml(servico)}</p>
+    ${formatarDataEvento(ev)?`<p><strong>Data e horário:</strong> ${escapeEmailHtml(formatarDataEvento(ev))}</p>`:''}
+    ${disponivel?`<p><strong>Valor final:</strong> ${escapeEmailHtml(formatarMoeda(valor || 0, moeda))}</p>`:''}
+    ${disponivel && (valor || 0) > 0 ? `<p><a href="${escapeEmailHtml(urlPagamentoEvento(ev))}">Acessar pagamento</a></p>`:''}
+    ${obs?`<p><strong>Observação:</strong> ${escapeEmailHtml(obs)}</p>`:''}
+    <p>Atenciosamente,<br>Equipe Audesc</p>
+  </div>`;
+  return {subject,text:textEmail,html};
+}
+
+async function enviarNotificacaoAgendaSeNecessario(evAntes, evDepois){
+  const status = text(evDepois?.status_agenda);
+  if(!['disponivel','indisponivel'].includes(status)) return {ok:false, skipped:true, reason:'status sem envio'};
+  if(text(evAntes?.status_agenda) === status) return {ok:false, skipped:true, reason:'status não mudou'};
+  if(!evDepois.email_usuario) return {ok:false, skipped:true, reason:'email_usuario ausente'};
+  const tipo = status === 'disponivel' ? 'agenda_disponivel' : 'agenda_indisponivel';
+  if(await envioJaRegistrado({tipo, evento_id:evDepois.id, email_destino:evDepois.email_usuario})){
+    return {ok:false, skipped:true, reason:'envio já registrado'};
+  }
+  const conteudo = montarEmailAgenda(evDepois, status);
+  const result = await enviarEmailResend({to:evDepois.email_usuario, subject:conteudo.subject, text:conteudo.text, html:conteudo.html, tags:[{name:'tipo',value:tipo}]});
+  await registrarEmailEnvio({tipo, evento_id:evDepois.id, email_destino:evDepois.email_usuario, assunto:conteudo.subject, mensagem:conteudo.text, status:result.ok?'enviado':(result.skipped?'nao_enviado':'erro'), erro:result.ok?null:JSON.stringify(result), response:result});
+  return result;
+}
+
+function inscritoCompatívelComEvento(inscrito, ev){
+  if(!inscrito || !inscrito.email || inscrito.ativo !== true || inscrito.email_validado !== true) return false;
+  if(inscrito.receber_todos === true) return true;
+  const paisEvento = text(ev.pais_codigo || codigoPaisMaps(ev.pais)).toUpperCase();
+  const paisInscrito = text(inscrito.pais_codigo || codigoPaisMaps(inscrito.pais)).toUpperCase();
+  if(paisEvento && paisInscrito && paisEvento !== paisInscrito) return false;
+  const unidadeEvento = text(ev.unidade_codigo || codigoUnidadeLocal(paisEvento, ev.uf, ev.uf)).toUpperCase();
+  const unidadeInscrito = text(inscrito.unidade_codigo || codigoUnidadeLocal(paisInscrito, inscrito.uf, inscrito.uf)).toUpperCase();
+  if(unidadeEvento && unidadeInscrito && unidadeInscrito !== 'NACIONAL' && unidadeEvento !== unidadeInscrito) return false;
+  if(Array.isArray(inscrito.eventos_ids) && inscrito.eventos_ids.length){
+    return inscrito.eventos_ids.includes(ev.id);
+  }
+  return true;
+}
+
+function montarEmailEventoPublicado(ev){
+  const titulo = ev.titulo_publicado || ev.titulo_original || 'Evento acessível divulgado no Audesc';
+  const dataEv = formatarDataEvento(ev);
+  const local = ev.local_evento || [ev.cidade, ev.uf, ev.pais].filter(Boolean).join(', ');
+  const link = urlEventoPublico(ev);
+  const subject = `Novo evento no Audesc: ${titulo}`;
+  const textEmail = `Olá!\n\nUm novo evento foi publicado no Audesc para a região escolhida no seu cadastro.\n\nEvento: ${titulo}\n${dataEv?`Data e horário: ${dataEv}\n`:''}${local?`Local: ${local}\n`:''}\nAcessar evento: ${link}\n\nVocê recebeu esta mensagem porque cadastrou seu e-mail para receber notificações de eventos no Audesc.\n\nAtenciosamente,\nEquipe Audesc`;
+  const html = `<div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111;">
+    <h1>Novo evento no Audesc</h1>
+    <p>Olá!</p>
+    <p>Um novo evento foi publicado no Audesc para a região escolhida no seu cadastro.</p>
+    <h2>${escapeEmailHtml(titulo)}</h2>
+    ${dataEv?`<p><strong>Data e horário:</strong> ${escapeEmailHtml(dataEv)}</p>`:''}
+    ${local?`<p><strong>Local:</strong> ${escapeEmailHtml(local)}</p>`:''}
+    <p><a href="${escapeEmailHtml(link)}">Acessar evento</a></p>
+    <p>Você recebeu esta mensagem porque cadastrou seu e-mail para receber notificações de eventos no Audesc.</p>
+    <p>Atenciosamente,<br>Equipe Audesc</p>
+  </div>`;
+  return {subject,text:textEmail,html};
+}
+
+async function notificarInscritosEventoPublicado(evAntes, evDepois){
+  if(text(evDepois?.tipo_evento) !== 'publico') return {ok:false, skipped:true, reason:'evento privado'};
+  if(text(evDepois?.status_publicacao) !== 'aprovado') return {ok:false, skipped:true, reason:'evento não aprovado'};
+  if(text(evAntes?.status_publicacao) === 'aprovado') return {ok:false, skipped:true, reason:'evento já aprovado antes'};
+  const sb=getSupabase();
+  let inscritos=[];
+  try{
+    const {data,error}=await sb.from('notificacoes').select('*').eq('ativo',true).eq('email_validado',true).limit(2000);
+    if(error) throw error;
+    inscritos=(data||[]).filter(n=>inscritoCompatívelComEvento(n, evDepois));
+  }catch(e){
+    console.warn('Não foi possível consultar inscritos para notificação:', e.message || e);
+    return {ok:false,error:String(e.message||e)};
+  }
+  const conteudo=montarEmailEventoPublicado(evDepois);
+  const resultados=[];
+  for(const n of inscritos){
+    const email=text(n.email).toLowerCase();
+    if(!email) continue;
+    const tipo='evento_publicado';
+    if(await envioJaRegistrado({tipo, evento_id:evDepois.id, email_destino:email})) continue;
+    const result=await enviarEmailResend({to:email, subject:conteudo.subject, text:conteudo.text, html:conteudo.html, tags:[{name:'tipo',value:tipo}]});
+    await registrarEmailEnvio({tipo, evento_id:evDepois.id, email_destino:email, assunto:conteudo.subject, mensagem:conteudo.text, status:result.ok?'enviado':(result.skipped?'nao_enviado':'erro'), erro:result.ok?null:JSON.stringify(result), response:result});
+    if(result.ok){
+      try{
+        await sb.from('notificacoes').update({ultimo_envio_em:new Date().toISOString(), total_envios:Number(n.total_envios||0)+1}).eq('email', email);
+      }catch(e){ console.warn('Não foi possível atualizar contador da notificação:', e.message||e); }
+    }
+    resultados.push({email, ok:!!result.ok, status:result.status || null});
+  }
+  return {ok:true,total:resultados.length,resultados};
+}
+
 async function liberar(req,res){
  try{
   if(!admin(req,res)) return;
@@ -742,21 +1747,39 @@ async function liberar(req,res){
   if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
   if(ev.status_publicacao!=='aprovado') return res.status(400).json({error:'Evento ainda não está aprovado.'});
   const evSincronizado = await sincronizarStatusPagamentoDivulgacao(ev);
-  if((evSincronizado.tipo_servico==='audesc_transmissao' || evSincronizado.tipo_servico==='audesc_com_audiodescritor' || evSincronizado.tipo_servico==='divulgacao_gratuita') && evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
-  if(evSincronizado.tipo_servico==='divulgacao_gratuita'){
+  if((servicoUsaTransmissao(evSincronizado.tipo_servico) || servicoSomenteDivulgacao(evSincronizado.tipo_servico)) && evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
+  if(servicoSomenteDivulgacao(evSincronizado.tipo_servico)){
    const {data:up,error:er}=await sb.from('eventos').update({status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
    if(er) throw er; return res.json({ok:true,tipo:'divulgacao_gratuita',evento:up});
   }
-  const senha=ev.senha_transmissor||await gerarSenhaUnica(sb); const sala=ev.sala_codigo||await gerarSalaUnica(sb);
+  const { senha, sala } = await gerarCredenciaisTransmissao(ev, sb);
   const enviarEmailLiberacaoAdmin = !(
     req.query?.enviar_email === 'false' ||
     req.query?.sem_email === 'true' ||
     req.body?.enviar_email === false ||
     req.body?.sem_email === true
   );
-  await appendSheet(ev,senha,sala);
-  const {data:up,error:er}=await sb.from('eventos').update({senha_transmissor:senha,sala_codigo:sala,status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
+  // A ordem passa a existir no próprio Audesc/Supabase.
+  // A planilha Google é apenas sincronização auxiliar, para evitar bloqueio por falhas temporárias do Google OAuth/Sheets.
+  const {data:up,error:er}=await sb.from('eventos').update({
+    senha_transmissor:senha,
+    sala_codigo:sala,
+    status_operacao:'liberado',
+    planilha_liberacao_status:'pendente',
+    planilha_liberacao_erro:null,
+    data_ultima_edicao:new Date().toISOString()
+  }).eq('id',req.params.id).select().single();
   if(er) throw er;
+  let planilha_resultado = {ok:false, skipped:true, status:'pendente'};
+  try{
+    await appendSheet(up, senha, sala);
+    await registrarStatusPlanilha(up.id, 'sincronizado', null);
+    planilha_resultado = {ok:true, status:'sincronizado'};
+  }catch(planilhaErro){
+    const msg = String(planilhaErro && planilhaErro.message ? planilhaErro.message : planilhaErro);
+    await registrarStatusPlanilha(up.id, 'erro', msg);
+    planilha_resultado = {ok:false, status:'erro', error:msg};
+  }
   let email_resultado = { ok:false, skipped:true, reason:'Envio automático desmarcado pelo administrador.' };
   if(enviarEmailLiberacaoAdmin){
     email_resultado = await enviarEmailLiberacao(up, senha, sala).catch(err => {
@@ -765,13 +1788,121 @@ async function liberar(req,res){
     });
   }
   await registrarResultadoEmail(up.id, email_resultado);
-  res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,email_resultado,evento:up});
+  res.json({ok:true,tipo:'audesc_transmissao',senha_transmissor:senha,sala_codigo:sala,email_resultado,planilha_resultado,evento:up});
  }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao liberar evento.'}); }
 }
 app.post('/liberar-evento/:id',liberar);
 app.get('/liberar-evento/:id',liberar);
+app.post('/admin/eventos/:id/regerar-ordem', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const sb=getSupabase();
+    const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
+    if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
+    if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
+    const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
+    const sala = ev.sala_codigo || await gerarSalaUnica(sb);
+    const {data:up,error:er}=await sb.from('eventos').update({
+      senha_transmissor:senha,
+      sala_codigo:sala,
+      status_operacao:'liberado',
+      planilha_liberacao_status:'pendente',
+      planilha_liberacao_erro:null,
+      data_ultima_edicao:new Date().toISOString()
+    }).eq('id',req.params.id).select().single();
+    if(er) throw er;
+    let planilha_resultado = {ok:false, status:'pendente'};
+    try{
+      await appendSheet(up, senha, sala);
+      await registrarStatusPlanilha(up.id, 'sincronizado', null);
+      planilha_resultado = {ok:true, status:'sincronizado'};
+    }catch(planilhaErro){
+      const msg = String(planilhaErro && planilhaErro.message ? planilhaErro.message : planilhaErro);
+      await registrarStatusPlanilha(up.id, 'erro', msg);
+      planilha_resultado = {ok:false, status:'erro', error:msg};
+    }
+    res.json({ok:true,mensagem: planilha_resultado.ok ? 'Ordem gerada no Audesc e sincronizada com a planilha.' : 'Ordem gerada no Audesc, mas ainda não sincronizada com a planilha Google.', senha_transmissor:senha,sala_codigo:sala,planilha_resultado,evento:up});
+  }catch(e){
+    console.error('Erro ao gerar/sincronizar ordem:', e);
+    res.status(500).json({error:e.message||'Erro ao gerar ordem de transmissão.'});
+  }
+});
 
 
+app.get('/admin/google-sheets/diagnostico', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const diag = await diagnosticarGoogleSheets();
+    res.status(diag.ok ? 200 : 500).json(diag);
+  }catch(e){
+    res.status(500).json({ ok:false, error:e.message || 'Erro ao diagnosticar Google Sheets.' });
+  }
+});
+
+app.post('/admin/eventos/:id/sincronizar-planilha', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const sb=getSupabase();
+    const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
+    if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
+    if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
+    const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
+    const sala = ev.sala_codigo || await gerarSalaUnica(sb);
+    let eventoParaPlanilha = ev;
+    if(!ev.senha_transmissor || !ev.sala_codigo){
+      const {data:up,error:er}=await sb.from('eventos').update({
+        senha_transmissor: senha,
+        sala_codigo: sala,
+        data_ultima_edicao: new Date().toISOString()
+      }).eq('id',req.params.id).select().single();
+      if(er) throw er;
+      eventoParaPlanilha = up;
+    }
+    try{
+      await appendSheet(eventoParaPlanilha, senha, sala);
+      await atualizarStatusPlanilhaLiberacao(sb, eventoParaPlanilha.id, 'sincronizado', null);
+      res.json({ok:true,mensagem:'Ordem sincronizada com a planilha Google.', sala_codigo:sala, senha_transmissor:senha});
+    }catch(e){
+      const msg = String(e && e.message ? e.message : e);
+      await atualizarStatusPlanilhaLiberacao(sb, eventoParaPlanilha.id, 'erro', msg);
+      res.status(500).json({ok:false,error:'Não foi possível sincronizar com a planilha Google.', detalhe:msg});
+    }
+  }catch(e){
+    res.status(500).json({error:e.message||'Erro ao sincronizar ordem com a planilha.'});
+  }
+});
+
+
+app.get('/formulario-config', async (req,res)=>{
+  try{
+    const cfg = await obterFormularioConfig();
+    res.json({ok:true,config:cfg,servicos:SERVICOS_CONFIG});
+  }catch(e){
+    res.status(500).json({error:e.message || 'Erro ao carregar configuração do formulário.'});
+  }
+});
+
+app.get('/admin/formulario-config', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const cfg = await obterFormularioConfig();
+    res.json({ok:true,config:cfg,servicos:SERVICOS_CONFIG});
+  }catch(e){
+    res.status(500).json({error:e.message || 'Erro ao carregar configuração do formulário.'});
+  }
+});
+
+app.patch('/admin/formulario-config', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const cfg = sanitizarFormularioConfig(req.body?.config || req.body || {});
+    const {data,error} = await getSupabase().from('formulario_config').upsert({id:'default',config:cfg,updated_at:new Date().toISOString()},{onConflict:'id'}).select().single();
+    if(error) throw error;
+    res.json({ok:true,config:data.config});
+  }catch(e){
+    res.status(500).json({error:e.message || 'Erro ao salvar configuração do formulário.'});
+  }
+});
 
 app.get('/admin/precificacao', async (req,res)=>{
  try{
@@ -902,8 +2033,50 @@ app.get('/pagamentos/calcular/:id', async (req,res)=>{
 app.get('/admin/precificacao-servicos', async (req,res)=>{
  try{
   if(!admin(req,res)) return;
-  const {data,error}=await getSupabase().from('precificacao_servicos').select('*').order('tipo_servico',{ascending:true}).order('moeda',{ascending:true});
+  const sb=getSupabase();
+  let {data,error}=await sb.from('precificacao_servicos').select('*').order('tipo_servico',{ascending:true}).order('moeda',{ascending:true});
   if(error) throw error;
+
+  // Garante que a página de precificação sempre tenha campos para todos os serviços ativos.
+  // Isso evita que novos serviços centralizados em data/servicos.json fiquem invisíveis até uma inserção manual no banco.
+  const existentes = new Set((data||[]).map(p => String(p.tipo_servico||'') + '|' + String(p.moeda||'')));
+  let moedas = [...new Set((data||[]).map(p => p.moeda).filter(Boolean))];
+  let precificacaoBase = [];
+  try{
+    const baseResp = await sb.from('precificacao').select('*').order('moeda',{ascending:true});
+    if(!baseResp.error && Array.isArray(baseResp.data)) precificacaoBase = baseResp.data;
+  }catch(_e){}
+  if(!moedas.length) moedas = [...new Set(precificacaoBase.map(p => p.moeda).filter(Boolean))];
+  if(!moedas.length) moedas = ['BRL','EUR','USD'];
+  const basePorMoeda = new Map(precificacaoBase.map(p => [p.moeda, p]));
+
+  const defaults = [];
+  for(const servico of SERVICOS_CONFIG.filter(s => s.ativo !== false)){
+    for(const moeda of moedas){
+      const key = servico.codigo + '|' + moeda;
+      if(existentes.has(key)) continue;
+      const base = basePorMoeda.get(moeda) || {};
+      const usaPacote = !!servico.usaTransmissao && !servico.somenteProfissional && !servico.somenteDivulgacao;
+      defaults.push({
+        tipo_servico: servico.codigo,
+        moeda,
+        valor_hora: 0,
+        valor_base_10_ouvintes_1_hora: usaPacote ? Number(base.valor_base_10_ouvintes_1_hora || 0) : 0,
+        acrescimo_por_10_ouvintes: usaPacote ? Number(base.acrescimo_por_10_ouvintes || 0) : 0,
+        ouvintes_minimos: usaPacote ? Number(base.ouvintes_minimos || 10) : 10,
+        duracao_minima_horas: usaPacote ? Number(base.duracao_minima_horas || 1) : 1,
+        atualizado_em: new Date().toISOString()
+      });
+    }
+  }
+  if(defaults.length){
+    const ins = await sb.from('precificacao_servicos').insert(defaults).select('*');
+    if(ins.error) console.warn('Não foi possível criar precificações faltantes:', ins.error.message || ins.error);
+    else data = [...(data||[]), ...(ins.data||[])];
+  }
+
+  const ordemServico = new Map(SERVICOS_CONFIG.map(s => [s.codigo, Number(s.ordem || 999)]));
+  data = (data||[]).sort((a,b)=>(ordemServico.get(a.tipo_servico)||999)-(ordemServico.get(b.tipo_servico)||999) || String(a.moeda).localeCompare(String(b.moeda)));
   res.json({ok:true,precificacao:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao carregar precificação dos serviços.'});}
 });
@@ -924,7 +2097,7 @@ app.get('/admin/agenda-pendencias', async (req,res)=>{
   const sb=getSupabase();
   const {data,error}=await sb
    .from('eventos')
-   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,status_pagamento,status_publicacao,status_operacao,created_at')
+   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,valor_sugerido_agenda,valor_final_agenda,valor_agenda_definido_por_admin,status_pagamento,status_publicacao,status_operacao,created_at')
    .in('tipo_servico', SERVICOS_COM_AGENDA)
    .order('created_at',{ascending:false})
    .limit(300);
@@ -937,6 +2110,27 @@ app.get('/admin/agenda-pendencias', async (req,res)=>{
  }
 });
 
+app.get('/admin/eventos/:id/valor-agenda', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const {data:ev,error}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).single();
+  if(error) throw error;
+  if(!requerAgendaProfissional(ev)) return res.status(400).json({error:'Este serviço não depende de agenda de profissional.'});
+  const calculo=await calcularValorSugeridoAgenda(ev);
+  const valorFinal=valorNumericoOuNull(ev.valor_final_agenda);
+  res.json({
+   ok:true,
+   moeda:calculo.moeda,
+   valor_sugerido_agenda:calculo.valor_sugerido_agenda,
+   valor_final_agenda:valorFinal === null ? calculo.valor_sugerido_agenda : valorFinal,
+   pacote:calculo.pacote
+  });
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e.message||'Erro ao calcular valor de agenda.'});
+ }
+});
+
 app.patch('/admin/eventos/:id/agenda', async (req,res)=>{
  try{
   if(!admin(req,res)) return;
@@ -944,13 +2138,27 @@ app.patch('/admin/eventos/:id/agenda', async (req,res)=>{
   if(!['pendente','disponivel','indisponivel'].includes(status)){
    return res.status(400).json({error:'Status de agenda inválido.'});
   }
+  const {data:ev,error:evError}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).single();
+  if(evError) throw evError;
+  if(!requerAgendaProfissional(ev)) return res.status(400).json({error:'Este serviço não depende de agenda de profissional.'});
+
+  const calculo=await calcularValorSugeridoAgenda(ev);
+  let valorFinal=valorNumericoOuNull(req.body?.valor_final_agenda);
+  if(valorFinal === null) valorFinal = valorNumericoOuNull(ev.valor_final_agenda);
+  if(valorFinal === null) valorFinal = calculo.valor_sugerido_agenda;
+
   const update={
    status_agenda:status,
    observacao_agenda:text(req.body?.observacao_agenda || req.body?.observacao),
+   valor_sugerido_agenda:calculo.valor_sugerido_agenda,
+   valor_final_agenda:valorFinal,
+   valor_agenda_definido_por_admin: status === 'disponivel',
    agenda_atualizado_em:new Date().toISOString(),
    data_ultima_edicao:new Date().toISOString()
   };
-  if(status === 'disponivel') update.status_pagamento='pendente';
+  if(status === 'disponivel') update.status_pagamento = valorFinal > 0 ? 'pendente' : 'dispensado';
+  if(status === 'indisponivel') update.status_pagamento = 'cancelado';
+  if(status === 'pendente') update.status_pagamento = 'pendente';
   const {data,error}=await getSupabase()
    .from('eventos')
    .update(update)
@@ -958,7 +2166,11 @@ app.patch('/admin/eventos/:id/agenda', async (req,res)=>{
    .select()
    .single();
   if(error) throw error;
-  res.json({ok:true,evento:data});
+  const email_agenda_resultado = await enviarNotificacaoAgendaSeNecessario(ev, data).catch(err => {
+   console.error('Falha ao enviar e-mail de agenda:', err);
+   return {ok:false,error:String(err && err.message ? err.message : err)};
+  });
+  res.json({ok:true,evento:data,valor_sugerido_agenda:calculo.valor_sugerido_agenda,valor_final_agenda:valorFinal,email_agenda_resultado});
  }catch(e){
   console.error(e);
   res.status(500).json({error:e.message||'Erro ao atualizar agenda do evento.'});
@@ -980,7 +2192,7 @@ app.get('/admin/emails', async (req,res)=>{
 
   const {data:notifs,error:notifsError}=await sb
    .from('notificacoes')
-   .select('email,ativo,email_validado,updated_at')
+   .select('email,ativo,email_validado,updated_at,ultimo_envio_em,total_envios,status')
    .not('email','is',null)
    .limit(1000);
   if(notifsError) throw notifsError;
@@ -989,6 +2201,18 @@ app.get('/admin/emails', async (req,res)=>{
    .from('email_status')
    .select('*');
   if(statusError) throw statusError;
+
+  let enviosRows=[];
+  try{
+   const enviosResp=await sb
+    .from('email_envios')
+    .select('email_destino,destinatarios,tipo,enviado_em,status')
+    .order('enviado_em',{ascending:false})
+    .limit(3000);
+   if(!enviosResp.error && Array.isArray(enviosResp.data)) enviosRows=enviosResp.data;
+  }catch(e){
+   console.warn('Histórico de envios indisponível:', e.message||e);
+  }
 
   const mapa=new Map();
 
@@ -1005,7 +2229,11 @@ app.get('/admin/emails', async (req,res)=>{
      notificacoes_validadas:false,
      status:'comum',
      observacao:'',
-     atualizado_em:null
+     atualizado_em:null,
+     total_envios:0,
+     ultimo_envio:null,
+     ultimo_envio_tipo:'',
+     ultimo_envio_status:''
     });
    }
    return mapa.get(e);
@@ -1025,6 +2253,12 @@ app.get('/admin/emails', async (req,res)=>{
     item.origem_notificacoes=true;
     item.notificacoes_ativas = item.notificacoes_ativas || !!n.ativo;
     item.notificacoes_validadas = item.notificacoes_validadas || !!n.email_validado;
+    item.total_envios = Math.max(Number(item.total_envios||0), Number(n.total_envios||0));
+    if(n.ultimo_envio_em && (!item.ultimo_envio || new Date(n.ultimo_envio_em) > new Date(item.ultimo_envio))){
+     item.ultimo_envio=n.ultimo_envio_em;
+     item.ultimo_envio_tipo='notificação automática';
+     item.ultimo_envio_status=n.status || '';
+    }
    }
   }
 
@@ -1034,6 +2268,23 @@ app.get('/admin/emails', async (req,res)=>{
     item.status=s.status || 'comum';
     item.observacao=s.observacao || '';
     item.atualizado_em=s.atualizado_em || null;
+   }
+  }
+
+  for(const envio of enviosRows||[]){
+   const destinos=[];
+   if(envio.email_destino) destinos.push(envio.email_destino);
+   if(Array.isArray(envio.destinatarios)) destinos.push(...envio.destinatarios);
+   for(const raw of destinos){
+    const item=garantir(raw);
+    if(item){
+     item.total_envios++;
+     if(!item.ultimo_envio || (envio.enviado_em && new Date(envio.enviado_em) > new Date(item.ultimo_envio))){
+      item.ultimo_envio=envio.enviado_em || null;
+      item.ultimo_envio_tipo=envio.tipo || '';
+      item.ultimo_envio_status=envio.status || '';
+     }
+    }
    }
   }
 
@@ -1181,13 +2432,17 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'descricao_publicada',
       'site_oficial',
       'link_ingressos',
+      'link_inscricao',
       'link_programacao',
       'link_acessibilidade',
       'data_evento',
       'duracao_horas',
       'max_ouvintes',
+      'max_ouvintes_extra',
+      'margem_transmissao_minutos',
       'tipo_servico',
       'tipo_evento',
+      'divulgar_acesso_ouvintes',
       'pais',
       'uf',
       'origem_transmissao',
@@ -1197,7 +2452,22 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'valor_original',
       'cupom_codigo',
       'desconto_aplicado',
-      'valor_final'
+      'valor_final',
+      'valor_sugerido_agenda',
+      'valor_final_agenda',
+      'valor_agenda_definido_por_admin',
+      'local_evento',
+      'latitude',
+      'longitude',
+      'pais_codigo',
+      'unidade_codigo',
+      'timezone',
+      'cidade',
+      'sala_codigo',
+      'senha_transmissor',
+      'exigir_gps_ouvintes',
+      'gps_raio_metros',
+      'gps_precisao_max_metros'
     ];
     const update = {};
     for (const key of allowed) {
@@ -1205,10 +2475,63 @@ app.patch('/admin/eventos/:id', async (req, res) => {
         update[key] = req.body[key];
       }
     }
+    ['site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
+    if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
+    if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = update.tipo_evento === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
+    if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,300);
+    if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
+    if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
+    if(Object.prototype.hasOwnProperty.call(update,'valor_sugerido_agenda')) update.valor_sugerido_agenda = valorNumericoOuNull(update.valor_sugerido_agenda);
+    if(Object.prototype.hasOwnProperty.call(update,'valor_final_agenda')) update.valor_final_agenda = valorNumericoOuNull(update.valor_final_agenda);
+    if(Object.prototype.hasOwnProperty.call(update,'valor_agenda_definido_por_admin')) update.valor_agenda_definido_por_admin = !!update.valor_agenda_definido_por_admin;
+    if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
+    if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
+    if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
+    if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
+    const paisParaTimezoneAdmin = update.pais === 'Internacional' ? update.origem_transmissao : update.pais;
+    if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo') || Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezonePorLocal(update.pais_codigo, update.unidade_codigo, paisParaTimezoneAdmin);
+    if(Object.prototype.hasOwnProperty.call(update,'data_evento')) update.data_evento = prepararDataEvento(update.data_evento, update.timezone);
+    if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
+    if(Object.prototype.hasOwnProperty.call(update,'sala_codigo')) update.sala_codigo = limit(update.sala_codigo,120);
+    if(Object.prototype.hasOwnProperty.call(update,'senha_transmissor')) update.senha_transmissor = limit(update.senha_transmissor,80);
+    if(Object.prototype.hasOwnProperty.call(update,'exigir_gps_ouvintes')) update.exigir_gps_ouvintes = update.exigir_gps_ouvintes === true || text(update.exigir_gps_ouvintes) === 'true' || text(update.exigir_gps_ouvintes) === 'sim' || text(update.exigir_gps_ouvintes) === '1';
+    if(Object.prototype.hasOwnProperty.call(update,'gps_raio_metros')) {
+      const raio = Number(update.gps_raio_metros || 200);
+      update.gps_raio_metros = Number.isFinite(raio) ? Math.max(10, Math.min(5000, Math.floor(raio))) : 200;
+    }
+    if(Object.prototype.hasOwnProperty.call(update,'gps_precisao_max_metros')) {
+      const precisao = Number(update.gps_precisao_max_metros || 500);
+      update.gps_precisao_max_metros = Number.isFinite(precisao) ? Math.max(10, Math.min(5000, Math.floor(precisao))) : 500;
+    }
+    if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes_extra')) {
+      const extra = Number(update.max_ouvintes_extra || 0);
+      update.max_ouvintes_extra = Number.isFinite(extra) ? Math.max(0, Math.min(500, Math.floor(extra))) : 0;
+    }
+    if(Object.prototype.hasOwnProperty.call(update,'margem_transmissao_minutos')) {
+      const margem = Number(update.margem_transmissao_minutos || 15);
+      update.margem_transmissao_minutos = Number.isFinite(margem) ? Math.max(0, Math.min(180, Math.floor(margem))) : 15;
+    }
+
+    if(Object.prototype.hasOwnProperty.call(update,'status_agenda') && ['disponivel','indisponivel','pendente'].includes(text(update.status_agenda))){
+      if(text(update.status_agenda) === 'disponivel'){
+        const finalAgenda = valorNumericoOuNull(update.valor_final_agenda);
+        if(finalAgenda !== null) update.status_pagamento = finalAgenda > 0 ? 'pendente' : 'dispensado';
+      }
+      if(text(update.status_agenda) === 'indisponivel') update.status_pagamento = 'cancelado';
+    }
+
     update.editado_por_admin = true;
     update.data_ultima_edicao = new Date().toISOString();
 
-    const { data, error } = await getSupabase()
+    const sbAdminPatch = getSupabase();
+    const { data: eventoAntes, error: eventoAntesError } = await sbAdminPatch
+      .from('eventos')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (eventoAntesError) throw eventoAntesError;
+
+    const { data, error } = await sbAdminPatch
       .from('eventos')
       .update(update)
       .eq('id', req.params.id)
@@ -1216,7 +2539,15 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       .single();
 
     if (error) throw error;
-    res.json({ ok: true, evento: data });
+    const email_agenda_resultado = await enviarNotificacaoAgendaSeNecessario(eventoAntes, data).catch(err => {
+      console.error('Falha ao enviar e-mail de agenda pelo painel:', err);
+      return {ok:false,error:String(err && err.message ? err.message : err)};
+    });
+    const email_publicacao_resultado = await notificarInscritosEventoPublicado(eventoAntes, data).catch(err => {
+      console.error('Falha ao notificar inscritos sobre evento publicado:', err);
+      return {ok:false,error:String(err && err.message ? err.message : err)};
+    });
+    res.json({ ok: true, evento: data, email_agenda_resultado, email_publicacao_resultado });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'Erro ao atualizar evento.' });
@@ -1224,9 +2555,168 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 });
 
 
+
+
+app.get('/token', async (req,res)=>{
+ try{
+  const room = limit(req.query.room || req.query.sala, 120);
+  const role = normalizarRoleToken(req.query.role || req.query.papel);
+  const identity = normalizarIdentityToken(req.query.identity || req.query.nome, role);
+  const password = String(req.query.password || req.query.senha || '').trim();
+  if(!room) return res.status(400).json({error:'Código da sala não informado.'});
+  const sb = getSupabase();
+  const ev = await buscarEventoOuPlanilhaPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao,max_ouvintes,duracao_horas,data_evento,latitude,longitude,exigir_gps_ouvintes,gps_raio_metros,gps_precisao_max_metros', {password});
+  if(!ev) return res.status(404).json({error:'Sala não encontrada no Audesc.', sala_consultada: room});
+  const liberado = String(ev.status_operacao || '').toLowerCase() === 'liberado' || String(ev.status_publicacao || '').toLowerCase() === 'aprovado';
+  if(!liberado) return res.status(403).json({error:'Esta sala ainda não está liberada.'});
+  const acessoAdmin = role === 'transmitter' && senhaAdminValida(password);
+  if(role === 'transmitter'){
+    const senhaOficial = String(ev.senha_transmissor || '').trim();
+    if(!senhaOficial && !acessoAdmin) return res.status(403).json({error:'A sala ainda não possui senha de transmissor.'});
+    if(!acessoAdmin && password !== senhaOficial) return res.status(403).json({error:'Senha do transmissor inválida.'});
+  }
+  if(role === 'receiver'){
+    const gps = validarGpsOuvinte(ev, req.query || {});
+    if(!gps.ok) return res.status(403).json({error:gps.error || 'Entrada não autorizada pela localização.', gps});
+  }
+  const tokenIdentity = role === 'transmitter'
+    ? `${identity}-${crypto.randomBytes(3).toString('hex')}`
+    : identity;
+  const token = gerarLiveKitToken({room: ev.sala_codigo || room, identity: tokenIdentity, role});
+  res.json({
+    ok:true,
+    token,
+    room: ev.sala_codigo || room,
+    role,
+    identity: tokenIdentity,
+    nome_informado: identity,
+    acesso: acessoAdmin ? 'admin' : 'padrao',
+    evento: ev.titulo_publicado || ev.titulo_original || 'Evento Audesc',
+    origem_sala: ev.origem || 'supabase',
+    origem_token:'audesc-events-api',
+    gps: gpsConfigEvento(ev)
+  });
+ }catch(e){
+  console.error('Erro ao gerar token LiveKit:', e);
+  res.status(500).json({error:e.message || 'Erro ao gerar token de transmissão.'});
+ }
+});
+
+
+app.get('/public/salas/:sala/controle-presenca', async (req,res)=>{
+ try{
+  const sala = limit(req.params.sala,120);
+  if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
+  const data = await buscarEventoOuPlanilhaPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,latitude,longitude,local_evento,exigir_gps_ouvintes,gps_raio_metros,gps_precisao_max_metros,status_operacao,created_at');
+  if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
+  const cfg = gpsConfigEvento(data);
+  res.json({
+    ok:true,
+    sala_codigo:data.sala_codigo || sala,
+    evento:data.titulo_publicado || data.titulo_original || 'Evento Audesc',
+    local_evento:data.local_evento || '',
+    exigir_gps_ouvintes:cfg.exigir,
+    gps_configurado:cfg.configurado,
+    gps_raio_metros:cfg.raio_metros,
+    gps_precisao_max_metros:cfg.precisao_max_metros,
+    latitude:cfg.exigir ? cfg.latitude : null,
+    longitude:cfg.exigir ? cfg.longitude : null,
+    status_operacao:data.status_operacao || null
+  });
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar controle de presença.'})}
+});
+
+app.get('/public/salas/:sala/limite-ouvintes', async (req,res)=>{
+ try{
+  const sala = limit(req.params.sala,120);
+  if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
+  const data = await buscarEventoOuPlanilhaPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,max_ouvintes,max_ouvintes_extra,status_operacao,created_at');
+  if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
+  const max = Number(data.max_ouvintes || 0);
+  const extra = Number(data.max_ouvintes_extra || 0);
+  const limite = max > 0 ? Math.max(1, Math.floor(max + Math.max(0, extra))) : null;
+  res.json({
+    ok:true,
+    sala_codigo:data.sala_codigo,
+    evento:data.titulo_publicado || data.titulo_original || 'Evento Audesc',
+    max_ouvintes:max || null,
+    max_ouvintes_extra:Math.max(0, Math.floor(extra || 0)),
+    limite_ouvintes:limite,
+    status_operacao:data.status_operacao || null
+  });
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar limite de ouvintes.'})}
+});
+
+
+function calcularJanelaTransmissaoEvento(ev){
+  const margem = Number.isFinite(Number(ev && ev.margem_transmissao_minutos)) ? Math.max(0, Math.min(180, Math.floor(Number(ev.margem_transmissao_minutos)))) : 15;
+  const duracaoHoras = Number(ev && ev.duracao_horas);
+  const inicio = ev && ev.data_evento ? new Date(ev.data_evento) : null;
+  if(!inicio || Number.isNaN(inicio.getTime()) || !Number.isFinite(duracaoHoras) || duracaoHoras <= 0){
+    return {margem, configurado:false, inicio:null, liberacao:null, termino:null, encerramento:null};
+  }
+  const termino = new Date(inicio.getTime() + duracaoHoras * 60 * 60 * 1000);
+  const liberacao = new Date(inicio.getTime() - margem * 60 * 1000);
+  const encerramento = new Date(termino.getTime() + margem * 60 * 1000);
+  return {margem, configurado:true, inicio, liberacao, termino, encerramento};
+}
+function statusJanelaTransmissao(ev){
+  const janela = calcularJanelaTransmissaoEvento(ev);
+  const agora = new Date();
+  if(!janela.configurado){
+    return {
+      ok:true,
+      configurado:false,
+      permitido_entrar:true,
+      permitido_permanecer:true,
+      margem_transmissao_minutos:janela.margem,
+      mensagem:'Janela de transmissão não configurada para este evento.'
+    };
+  }
+  const antes = agora.getTime() < janela.liberacao.getTime();
+  const depois = agora.getTime() > janela.encerramento.getTime();
+  const minutos_ate_liberacao = antes ? Math.ceil((janela.liberacao.getTime() - agora.getTime()) / 60000) : 0;
+  const minutos_restantes = Math.max(0, Math.ceil((janela.encerramento.getTime() - agora.getTime()) / 60000));
+  return {
+    ok:true,
+    configurado:true,
+    permitido_entrar:!antes && !depois,
+    permitido_permanecer:!depois,
+    antes_da_liberacao:antes,
+    apos_encerramento:depois,
+    margem_transmissao_minutos:janela.margem,
+    inicio_evento:janela.inicio.toISOString(),
+    liberacao_transmissao:janela.liberacao.toISOString(),
+    termino_evento:janela.termino.toISOString(),
+    encerramento_transmissao:janela.encerramento.toISOString(),
+    minutos_ate_liberacao,
+    minutos_restantes,
+    mensagem: antes
+      ? `A transmissão será liberada em aproximadamente ${minutos_ate_liberacao} minuto(s).`
+      : depois
+        ? 'A janela de transmissão deste evento foi encerrada.'
+        : `Restam ${minutos_restantes} minuto(s) para o encerramento da transmissão.`
+  };
+}
+
+app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
+ try{
+  const sala = limit(req.params.sala,120);
+  if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
+  const data = await buscarEventoOuPlanilhaPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,margem_transmissao_minutos,status_operacao,created_at');
+  if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
+  const status = statusJanelaTransmissao(data);
+  res.json(Object.assign(status, {
+    sala_codigo:data.sala_codigo,
+    evento:data.titulo_publicado || data.titulo_original || 'Evento Audesc',
+    status_operacao:data.status_operacao || null
+  }));
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar janela de transmissão.'})}
+});
+
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -1239,7 +2729,11 @@ app.post('/notificacoes/solicitar', async (req,res)=>{
   const email=text(b.email).toLowerCase();
   if(!email || !email.includes('@')) return res.status(400).json({error:'Informe um e-mail válido.'});
   if(await emailBloqueado(email)) return res.status(403).json({error:'Este e-mail está bloqueado para cadastro de notificações.'});
-  const payload={email,receber_todos:!!b.receber_todos,pais:text(b.pais),uf:text(b.uf),eventos_ids:Array.isArray(b.eventos_ids)?b.eventos_ids:[],updated_at:new Date().toISOString()};
+  const paisNotificacao=text(b.pais);
+  const ufNotificacao=text(b.uf);
+  const paisCodigoNotificacao=limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisNotificacao),10);
+  const unidadeCodigoNotificacao=limit(b.unidade_codigo || b.unidadeCodigo || codigoUnidadeLocal(paisCodigoNotificacao, ufNotificacao, b.ufTexto),20);
+  const payload={email,receber_todos:!!b.receber_todos,pais:paisNotificacao,uf:ufNotificacao,pais_codigo:paisCodigoNotificacao,unidade_codigo:unidadeCodigoNotificacao,eventos_ids:Array.isArray(b.eventos_ids)?b.eventos_ids:[],updated_at:new Date().toISOString()};
   const sb=getSupabase();
   const {data:existing,error:findError}=await sb.from('notificacoes').select('*').eq('email',email).maybeSingle();
   if(findError) throw findError;
@@ -1285,7 +2779,7 @@ app.post('/admin/eventos/:id/reenviar-email', async (req,res)=>{
   const {data:ev,error}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).single();
   if(error) throw error;
   if(!ev) return res.status(404).json({error:'Evento não encontrado.'});
-  if(ev.tipo_servico !== 'audesc_transmissao') return res.status(400).json({error:'Este evento não é de transmissão Audesc.'});
+  if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este evento não é de transmissão Audesc.'});
   if(!ev.sala_codigo || !ev.senha_transmissor) return res.status(400).json({error:'Evento ainda não possui sala e senha. Libere o evento antes de reenviar o e-mail.'});
 
   const email_resultado = await enviarEmailLiberacao(ev, ev.senha_transmissor, ev.sala_codigo).catch(err => {
@@ -1577,7 +3071,7 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   if(error) throw error;
   if(!ev) throw new Error('Evento não encontrado para liberação automática.');
 
-  if(ev.tipo_servico !== 'audesc_transmissao'){
+  if(!servicoUsaTransmissao(ev.tipo_servico)){
     console.log('PÓS-PAGAMENTO: evento não é de transmissão Audesc. Não será gerada sala.', eventoId);
     return { ok:false, skipped:true, reason:'Evento não é de transmissão Audesc.' };
   }
@@ -1587,35 +3081,31 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
     return { ok:true, already_liberated:true, evento:ev, sala_codigo:ev.sala_codigo, senha_transmissor:ev.senha_transmissor };
   }
 
-  const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
-  const sala = ev.sala_codigo || await gerarSalaUnica(sb);
+  const { senha, sala } = await gerarCredenciaisTransmissao(ev, sb);
 
+  // A ordem oficial passa a existir primeiro no Supabase/Audesc.
+  // A planilha Google é sincronização auxiliar e não deve bloquear a liberação após pagamento.
   const { data: up, error: er } = await sb.from('eventos').update({
     status_publicacao: ev.status_publicacao || 'aprovado',
     status_pagamento: 'pago',
     status_operacao: 'liberado',
     senha_transmissor: senha,
     sala_codigo: sala,
+    planilha_liberacao_status: 'pendente',
+    planilha_liberacao_erro: null,
     data_ultima_edicao: new Date().toISOString()
   }).eq('id', eventoId).select().single();
 
   if(er) throw er;
 
   try{
-    await appendSheet(up, up.senha_transmissor, up.sala_codigo);
-    await sb.from('eventos').update({
-      planilha_liberacao_status:'salvo',
-      planilha_liberacao_em:new Date().toISOString()
-    }).eq('id', eventoId);
-    console.log('PÓS-PAGAMENTO: dados salvos na planilha:', eventoId, up.sala_codigo);
-  }catch(e){
-    console.error('PÓS-PAGAMENTO: falha ao salvar na planilha:', e.message || e);
-    try{
-      await sb.from('eventos').update({
-        planilha_liberacao_status:'erro',
-        planilha_liberacao_erro:String(e && e.message ? e.message : e)
-      }).eq('id', eventoId);
-    }catch(_e){}
+    await appendSheet(up, senha, sala);
+    await atualizarStatusPlanilhaLiberacao(sb, up.id, 'sincronizado', null);
+    console.log('PÓS-PAGAMENTO: ordem sincronizada com a planilha:', eventoId, sala);
+  }catch(planilhaErro){
+    const msg = String(planilhaErro && planilhaErro.message ? planilhaErro.message : planilhaErro);
+    await atualizarStatusPlanilhaLiberacao(sb, up.id, 'erro', msg);
+    console.warn('PÓS-PAGAMENTO: ordem gerada no Audesc, mas não sincronizada com a planilha:', msg);
   }
 
   let email_resultado = { ok:false, skipped:true, reason:'E-mail não enviado.' };
@@ -1926,25 +3416,32 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','tipo_servico','pais','uf','local_evento','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
   }
+  const paisCodigoEdicao = limit(update.pais_codigo || ev.pais_codigo || codigoPaisMaps(update.pais || ev.pais),10);
+  const unidadeCodigoEdicao = limit(update.unidade_codigo || ev.unidade_codigo || codigoUnidadeLocal(paisCodigoEdicao, update.uf || ev.uf, ''),20);
+  const formularioCfgEdicao = await obterFormularioConfig();
+  const localCfgEdicao = resolverFormularioConfigParaLocal(formularioCfgEdicao, paisCodigoEdicao, unidadeCodigoEdicao);
   if(Object.prototype.hasOwnProperty.call(update,'titulo_original')){
-   update.titulo_original = limit(update.titulo_original,200);
-   if(!update.titulo_original) return res.status(400).json({error:'Informe o nome do evento.'});
+   update.titulo_original = validarTextoConfigurado(update.titulo_original, 'o nome do evento', localCfgEdicao.limites?.titulo_original, true);
   }
-  if(Object.prototype.hasOwnProperty.call(update,'descricao_original')) update.descricao_original = limit(update.descricao_original,5000);
-  ['site_oficial','link_ingressos','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
+  if(Object.prototype.hasOwnProperty.call(update,'descricao_original')){
+   const descricaoObrigatoriaEdicao = !!localCfgEdicao.campos?.descricao_original?.obrigatorio;
+   update.descricao_original = validarTextoConfigurado(update.descricao_original, 'a descrição do evento', localCfgEdicao.limites?.descricao_original, descricaoObrigatoriaEdicao);
+  }
+  ['site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
   if(Object.prototype.hasOwnProperty.call(update,'duracao_horas')) update.duracao_horas = Math.max(1,Math.min(8,Number(update.duracao_horas||1)));
   if(Object.prototype.hasOwnProperty.call(update,'max_ouvintes')){
    const n=Math.max(10,Math.min(500,Number(update.max_ouvintes||10)));
    update.max_ouvintes=Math.ceil(n/10)*10;
   }
   if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
+  if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = (update.tipo_evento || ev.tipo_evento) === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
   if(Object.prototype.hasOwnProperty.call(update,'tipo_servico')){
-   const tiposServicoValidos=['audesc_transmissao','divulgacao_gratuita','audesc_com_audiodescritor','somente_audiodescritor','somente_consultor'];
+   const tiposServicoValidos=listarTiposServicoValidos();
    const tipoSolicitado=text(update.tipo_servico);
    update.tipo_servico = tiposServicoValidos.includes(tipoSolicitado) ? tipoSolicitado : (ev.tipo_servico || 'audesc_transmissao');
    const evAtualizadoParaCalculo = {...ev, ...update};
@@ -1956,7 +3453,28 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
   if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
   if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
-  if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
+  const paisFinalEdicao = Object.prototype.hasOwnProperty.call(update,'pais') ? update.pais : ev.pais;
+  if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (paisFinalEdicao === 'Outros' || paisFinalEdicao === 'Internacional') ? '' : text(update.uf);
+  if(Object.prototype.hasOwnProperty.call(update,'origem_transmissao')) update.origem_transmissao = paisFinalEdicao === 'Internacional' ? text(update.origem_transmissao) : '';
+  else if(Object.prototype.hasOwnProperty.call(update,'pais') && paisFinalEdicao !== 'Internacional') update.origem_transmissao = '';
+  if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(paisFinalEdicao === 'Internacional' ? update.origem_transmissao : update.pais),10);
+  if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
+  const paisParaTimezoneUsuario = paisFinalEdicao === 'Internacional' ? update.origem_transmissao || ev.origem_transmissao : paisFinalEdicao;
+  if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo') || Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezonePorLocal(update.pais_codigo || paisCodigoEdicao, update.unidade_codigo || unidadeCodigoEdicao, paisParaTimezoneUsuario);
+  if(Object.prototype.hasOwnProperty.call(update,'data_evento')) update.data_evento = prepararDataEvento(update.data_evento, update.timezone || ev.timezone);
+  if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
+  const tipoServicoFinal = update.tipo_servico || ev.tipo_servico;
+  const paisCodigoFinal = update.pais_codigo || paisCodigoEdicao;
+  const unidadeCodigoFinal = update.unidade_codigo || unidadeCodigoEdicao;
+  const localCfgFinal = resolverFormularioConfigParaLocal(formularioCfgEdicao, paisCodigoFinal, unidadeCodigoFinal);
+  const houveMudancaDeServicoOuLocal = Object.prototype.hasOwnProperty.call(update,'tipo_servico') ||
+   Object.prototype.hasOwnProperty.call(update,'pais') ||
+   Object.prototype.hasOwnProperty.call(update,'uf') ||
+   Object.prototype.hasOwnProperty.call(update,'pais_codigo') ||
+   Object.prototype.hasOwnProperty.call(update,'unidade_codigo');
+  if(houveMudancaDeServicoOuLocal && Array.isArray(localCfgFinal.servicosDisponiveis) && !localCfgFinal.servicosDisponiveis.includes(tipoServicoFinal)){
+   return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
+  }
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
   update.descricao_publicada = Object.prototype.hasOwnProperty.call(update,'descricao_original') ? update.descricao_original : (ev.descricao_publicada || ev.descricao_original);
   update.data_ultima_edicao = new Date().toISOString();
