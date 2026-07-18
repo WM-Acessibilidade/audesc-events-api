@@ -1207,29 +1207,35 @@ async function geocodeNominatim(query, ctx){
 }
 
 
+function componenteEnderecoPlace(item, tipo){
+  const comps=Array.isArray(item?.addressComponents)?item.addressComponents:[];
+  return comps.find(c=>Array.isArray(c.types)&&c.types.includes(tipo)) || null;
+}
+function metadadosGooglePlace(item){
+  const pais=componenteEnderecoPlace(item,'country');
+  const unidade=componenteEnderecoPlace(item,'administrative_area_level_1');
+  const cidade=componenteEnderecoPlace(item,'locality') || componenteEnderecoPlace(item,'administrative_area_level_2');
+  return {
+    pais_nome:String(pais?.longText||'').trim(),
+    pais_codigo:String(pais?.shortText||'').trim().toUpperCase(),
+    unidade_nome:String(unidade?.longText||'').trim(),
+    unidade_codigo:String(unidade?.shortText||'').trim().toUpperCase(),
+    cidade:String(cidade?.longText||'').trim()
+  };
+}
 async function detalhesGooglePlace(placeId){
   const campos='id,displayName,formattedAddress,location,addressComponents';
   const r=await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?languageCode=pt-BR`,{
-    headers:{
-      'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
-      'X-Goog-FieldMask':campos
-    }
+    headers:{'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,'X-Goog-FieldMask':campos}
   });
   if(!r.ok) return null;
   return await r.json().catch(()=>null);
 }
-
-async function sugerirGooglePlaces(query, ctx){
-  if(!GOOGLE_MAPS_API_KEY) return [];
+async function previsoesAutocompleteGoogle(query, codigoPais){
   const body={input:query,languageCode:'pt-BR'};
-  if(ctx.codigoPais) body.includedRegionCodes=[ctx.codigoPais.toLowerCase()];
+  if(codigoPais) body.includedRegionCodes=[String(codigoPais).toLowerCase()];
   const r=await fetch('https://places.googleapis.com/v1/places:autocomplete',{
-    method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY
-    },
-    body:JSON.stringify(body)
+    method:'POST',headers:{'Content-Type':'application/json','X-Goog-Api-Key':GOOGLE_MAPS_API_KEY},body:JSON.stringify(body)
   });
   if(!r.ok){
     const detalhe=await r.text().catch(()=>'');
@@ -1237,27 +1243,34 @@ async function sugerirGooglePlaces(query, ctx){
     return [];
   }
   const j=await r.json().catch(()=>({}));
-  const previsoes=(Array.isArray(j.suggestions)?j.suggestions:[])
-    .map(s=>s.placePrediction)
-    .filter(Boolean)
-    .slice(0,8);
-  const resultados=[];
-  const vistos=new Set();
+  return (Array.isArray(j.suggestions)?j.suggestions:[]).map(x=>x.placePrediction).filter(Boolean);
+}
+async function sugerirGooglePlaces(query, ctx){
+  if(!GOOGLE_MAPS_API_KEY) return [];
+  // Primeiro prioriza o país escolhido. Depois completa, sem bloqueio geográfico.
+  const preferidas=ctx.codigoPais ? await previsoesAutocompleteGoogle(query,ctx.codigoPais) : [];
+  const globais=await previsoesAutocompleteGoogle(query,'');
+  const previsoes=[...preferidas,...globais];
+  const resultados=[], vistos=new Set();
   for(const previsao of previsoes){
     const placeId=String(previsao.placeId||'').trim();
-    if(!placeId || vistos.has(placeId)) continue;
+    if(!placeId||vistos.has(placeId)) continue;
     vistos.add(placeId);
     const item=await detalhesGooglePlace(placeId);
-    if(!item || !resultadoGoogleNovoDentro(item,ctx)) continue;
-    const loc=item.location||{};
-    const lat=Number(loc.latitude), lon=Number(loc.longitude);
+    if(!item) continue;
+    const loc=item.location||{}, lat=Number(loc.latitude), lon=Number(loc.longitude);
     if(!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
+    const meta=metadadosGooglePlace(item);
     const endereco=String(item.formattedAddress||previsao.text?.text||'').trim();
     const nome=String(item.displayName?.text||previsao.structuredFormat?.mainText?.text||endereco||query).trim();
-    resultados.push({id:placeId,nome,endereco,lat,lon,provedor:'google_places_autocomplete'});
-    if(resultados.length>=5) break;
+    const texto_completo=[nome,endereco&&endereco!==nome?endereco:''].filter(Boolean).join(' — ');
+    const mesmaUnidade=!!ctx.unidadeCodigo && meta.unidade_codigo===String(ctx.unidadeCodigo).toUpperCase();
+    const mesmoPais=!!ctx.codigoPais && meta.pais_codigo===String(ctx.codigoPais).toUpperCase();
+    resultados.push({id:placeId,place_id:placeId,nome,endereco,texto_completo,lat,lon,provedor:'google_places_autocomplete',...meta,_prioridade:mesmaUnidade?0:(mesmoPais?1:2)});
+    if(resultados.length>=12) break;
   }
-  return resultados;
+  resultados.sort((a,b)=>a._prioridade-b._prioridade);
+  return resultados.slice(0,5).map(({_prioridade,...item})=>item);
 }
 
 app.get('/geocode/sugestoes', async (req,res)=>{
@@ -1391,7 +1404,7 @@ app.post('/criar-evento', async (req,res)=>{
   const titulo = validarTextoConfigurado(b.titulo_original, 'o nome do evento', localCfg.limites?.titulo_original, true);
   const descricaoObrigatoria = !!camposCfg.descricao_original?.obrigatorio;
   const descricaoOriginal = validarTextoConfigurado(b.descricao_original, 'a descrição do evento', localCfg.limites?.descricao_original, descricaoObrigatoria);
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,300),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: origemTransmissaoEvento,
       data_evento:dataEventoNormalizada,duracao_horas,max_ouvintes};
@@ -2473,7 +2486,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'valor_sugerido_agenda',
       'valor_final_agenda',
       'valor_agenda_definido_por_admin',
-      'local_evento',
+      'local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo',
       'latitude',
       'longitude',
       'pais_codigo',
@@ -2495,7 +2508,12 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     ['site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
     if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
     if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = update.tipo_evento === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
-    if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,300);
+    if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,500);
+    if(Object.prototype.hasOwnProperty.call(update,'local_nome')) update.local_nome = limit(update.local_nome,200);
+    if(Object.prototype.hasOwnProperty.call(update,'local_endereco')) update.local_endereco = limit(update.local_endereco,400);
+    if(Object.prototype.hasOwnProperty.call(update,'google_place_id')) update.google_place_id = limit(update.google_place_id,255);
+    if(Object.prototype.hasOwnProperty.call(update,'local_pais_codigo')) update.local_pais_codigo = limit(update.local_pais_codigo,10);
+    if(Object.prototype.hasOwnProperty.call(update,'local_unidade_codigo')) update.local_unidade_codigo = limit(update.local_unidade_codigo,30);
     if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
     if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
     if(Object.prototype.hasOwnProperty.call(update,'valor_sugerido_agenda')) update.valor_sugerido_agenda = valorNumericoOuNull(update.valor_sugerido_agenda);
@@ -3433,7 +3451,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -3466,7 +3484,12 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
    update.status_agenda = SERVICOS_COM_AGENDA.includes(update.tipo_servico) ? 'pendente' : 'nao_aplicavel';
    update.status_operacao = 'nao_liberado';
   }
-  if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,300);
+  if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,500);
+    if(Object.prototype.hasOwnProperty.call(update,'local_nome')) update.local_nome = limit(update.local_nome,200);
+    if(Object.prototype.hasOwnProperty.call(update,'local_endereco')) update.local_endereco = limit(update.local_endereco,400);
+    if(Object.prototype.hasOwnProperty.call(update,'google_place_id')) update.google_place_id = limit(update.google_place_id,255);
+    if(Object.prototype.hasOwnProperty.call(update,'local_pais_codigo')) update.local_pais_codigo = limit(update.local_pais_codigo,10);
+    if(Object.prototype.hasOwnProperty.call(update,'local_unidade_codigo')) update.local_unidade_codigo = limit(update.local_unidade_codigo,30);
   if(Object.prototype.hasOwnProperty.call(update,'latitude')) update.latitude = numeroCoordenada(update.latitude);
   if(Object.prototype.hasOwnProperty.call(update,'longitude')) update.longitude = numeroCoordenada(update.longitude);
   if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
