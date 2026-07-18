@@ -1207,37 +1207,62 @@ async function geocodeNominatim(query, ctx){
 }
 
 
+async function detalhesGooglePlace(placeId, ctx){
+  if(!GOOGLE_MAPS_API_KEY || !placeId) return null;
+  const url='https://places.googleapis.com/v1/places/'+encodeURIComponent(placeId)+'?languageCode=pt-BR';
+  const r=await fetch(url,{
+    headers:{
+      'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
+      'X-Goog-FieldMask':'id,displayName,formattedAddress,location,addressComponents'
+    }
+  });
+  if(!r.ok) return null;
+  const item=await r.json().catch(()=>null);
+  if(!item || !resultadoGoogleNovoDentro(item,ctx)) return null;
+  const loc=item.location||{};
+  const lat=Number(loc.latitude), lon=Number(loc.longitude);
+  if(!Number.isFinite(lat)||!Number.isFinite(lon)) return null;
+  const endereco=String(item.formattedAddress||'').trim();
+  const nome=String(item.displayName?.text||endereco||'').trim();
+  return {id:item.id||placeId,nome,endereco,lat,lon,provedor:'google_places_autocomplete'};
+}
+
 async function sugerirGooglePlaces(query, ctx){
   if(!GOOGLE_MAPS_API_KEY) return [];
-  const variantes=montarVariantesConsultaLocal(query, ctx.pais, ctx.uf, ctx.ufTexto).slice(0,4);
+  const body={input:String(query||'').trim(),languageCode:'pt-BR'};
+  if(ctx.codigoPais && /^[A-Z]{2}$/.test(ctx.codigoPais)){
+    body.regionCode=ctx.codigoPais;
+    body.includedRegionCodes=[ctx.codigoPais];
+  }
+  const r=await fetch('https://places.googleapis.com/v1/places:autocomplete',{
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
+      'X-Goog-FieldMask':'suggestions.placePrediction.placeId,suggestions.placePrediction.text,suggestions.placePrediction.structuredFormat'
+    },
+    body:JSON.stringify(body)
+  });
+  if(!r.ok){
+    const detalhe=await r.text().catch(()=>'');
+    console.warn('Google Places Autocomplete recusou a consulta:',r.status,detalhe.slice(0,500));
+    return [];
+  }
+  const j=await r.json().catch(()=>({}));
+  const predictions=(Array.isArray(j.suggestions)?j.suggestions:[])
+    .map(s=>s.placePrediction)
+    .filter(Boolean)
+    .slice(0,8);
   const resultados=[];
   const vistos=new Set();
-  for(const consulta of variantes){
-    const body={textQuery:consulta,languageCode:'pt-BR',maxResultCount:8};
-    if(ctx.codigoPais) body.regionCode=ctx.codigoPais;
-    const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
-        'X-Goog-FieldMask':'places.id,places.displayName,places.formattedAddress,places.location,places.addressComponents'
-      },
-      body:JSON.stringify(body)
-    });
-    if(!r.ok) continue;
-    const j=await r.json().catch(()=>({}));
-    for(const item of (Array.isArray(j.places)?j.places:[])){
-      if(!resultadoGoogleNovoDentro(item,ctx)) continue;
-      const loc=item.location||{};
-      const lat=Number(loc.latitude), lon=Number(loc.longitude);
-      if(!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
-      const endereco=String(item.formattedAddress||'').trim();
-      const nome=String(item.displayName?.text||endereco||query).trim();
-      const chave=(item.id||`${lat},${lon}`).toLowerCase();
-      if(vistos.has(chave)) continue;
-      vistos.add(chave);
-      resultados.push({id:item.id||chave,nome,endereco,lat,lon,provedor:'google_places_new'});
-      if(resultados.length>=5) return resultados;
+  for(const prediction of predictions){
+    const placeId=prediction.placeId;
+    if(!placeId || vistos.has(placeId)) continue;
+    vistos.add(placeId);
+    const detalhe=await detalhesGooglePlace(placeId,ctx);
+    if(detalhe){
+      resultados.push(detalhe);
+      if(resultados.length>=5) break;
     }
   }
   return resultados;
