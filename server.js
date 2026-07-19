@@ -129,12 +129,36 @@ function sanitizarFormularioConfig(input){
       maximo
     };
   }
+  function limpaRegrasPorServico(v, fallback={}){
+    const out = {};
+    const fonte = v && typeof v === 'object' ? v : fallback;
+    const comportamentos = new Set(['usuario','fixo','oculto_sem_valor']);
+    for(const codigo of Object.keys(fonte || {})){
+      if(!validos.has(codigo)) continue;
+      const item = fonte[codigo] && typeof fonte[codigo] === 'object' ? fonte[codigo] : {};
+      const camposFonte = item.campos && typeof item.campos === 'object' ? item.campos : {};
+      const camposServico = {};
+      for(const campo of Object.keys(base.padrao.campos)){
+        if(!Object.prototype.hasOwnProperty.call(camposFonte, campo)) continue;
+        const c = camposFonte[campo] && typeof camposFonte[campo] === 'object' ? camposFonte[campo] : {};
+        const comportamentoInformado = c.comportamento || c.modo;
+        const comportamento = comportamentos.has(comportamentoInformado) ? comportamentoInformado : 'usuario';
+        let valor = c.valor;
+        if(campo === 'tipo_evento' && valor !== 'privado') valor = 'publico';
+        if(campo === 'divulgar_acesso_ouvintes') valor = valor === true || String(valor ?? '').trim() === 'true';
+        camposServico[campo] = { comportamento, valor: valor ?? '' };
+      }
+      out[codigo] = { campos: camposServico };
+    }
+    return out;
+  }
   const camposBase = Object.assign({}, base.padrao.campos, cfg.padrao?.campos || {});
   const campos = {};
   for(const k of Object.keys(base.padrao.campos)) campos[k] = limpaCampo(camposBase[k], base.padrao.campos[k]);
   const limitesBase = Object.assign({}, base.padrao.limites, cfg.padrao?.limites || {});
   const limites = {};
   for(const k of Object.keys(base.padrao.limites)) limites[k] = limpaLimite(limitesBase[k], base.padrao.limites[k]);
+  const regrasPorServicoPadrao = limpaRegrasPorServico(cfg.padrao?.regrasPorServico, base.padrao.regrasPorServico || {});
   const regras = Array.isArray(cfg.regras) ? cfg.regras.map(r => {
     const pais = limit(r.pais_codigo || r.paisCodigo || '', 8).toUpperCase();
     const unidade = limit(r.unidade_codigo || r.unidadeCodigo || '', 30).toUpperCase();
@@ -155,13 +179,19 @@ function sanitizarFormularioConfig(input){
       nome: limit(r.nome || '', 160),
       servicosDisponiveis: limpaServicos(r.servicosDisponiveis, base.padrao.servicosDisponiveis),
       campos: camposRegra,
-      limites: limitesRegra
+      limites: limitesRegra,
+      regrasPorServico: limpaRegrasPorServico(r.regrasPorServico, {})
     };
   }).filter(Boolean) : base.regras;
   return {
     versao: 1,
     atualizado_em: new Date().toISOString(),
-    padrao: { servicosDisponiveis: limpaServicos(cfg.padrao?.servicosDisponiveis, base.padrao.servicosDisponiveis), campos, limites },
+    padrao: {
+      servicosDisponiveis: limpaServicos(cfg.padrao?.servicosDisponiveis, base.padrao.servicosDisponiveis),
+      campos,
+      limites,
+      regrasPorServico: regrasPorServicoPadrao
+    },
     regras
   };
 }
@@ -183,10 +213,12 @@ function resolverFormularioConfigParaLocal(config, paisCodigo, unidadeCodigo){
   const regra = cfg.regras.find(r => r.pais_codigo === pais && r.unidade_codigo === unidade);
   const campos = Object.assign({}, cfg.padrao.campos, regra?.campos || {});
   const limites = Object.assign({}, cfg.padrao.limites, regra?.limites || {});
+  const regrasPorServico = Object.assign({}, cfg.padrao.regrasPorServico || {}, regra?.regrasPorServico || {});
   return {
     servicosDisponiveis: regra?.servicosDisponiveis?.length ? regra.servicosDisponiveis : cfg.padrao.servicosDisponiveis,
     campos,
-    limites
+    limites,
+    regrasPorServico
   };
 }
 
