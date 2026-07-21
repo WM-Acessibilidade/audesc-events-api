@@ -39,7 +39,7 @@ function carregarServicosConfig(){
   const padrao = [
     {codigo:'audesc_transmissao',nome:'Transmissão Audesc (transmissor e receptores)',ativo:true,requerAgenda:false,usaTransmissao:true,somenteDivulgacao:false,somenteProfissional:false,permiteValorManual:false},
     {codigo:'divulgacao_gratuita',nome:'Somente divulgação no Audesc',ativo:true,requerAgenda:false,usaTransmissao:false,somenteDivulgacao:true,somenteProfissional:false,permiteValorManual:false},
-    {codigo:'audesc_com_audiodescritor',nome:'Serviço completo - Audesc + audiodescritor',ativo:true,requerAgenda:true,usaTransmissao:true,somenteDivulgacao:false,somenteProfissional:false,permiteValorManual:true},
+    {codigo:'audesc_com_audiodescritor',nome:'Serviço completo - Audesc + audiodescritor (legado)',ativo:false,requerAgenda:true,usaTransmissao:true,somenteDivulgacao:false,somenteProfissional:false,permiteValorManual:true},
     {codigo:'somente_audiodescritor',nome:'Audiodescritor',ativo:true,requerAgenda:true,usaTransmissao:false,somenteDivulgacao:false,somenteProfissional:true,permiteValorManual:true},
     {codigo:'somente_consultor',nome:'Consultor',ativo:true,requerAgenda:true,usaTransmissao:false,somenteDivulgacao:false,somenteProfissional:true,permiteValorManual:true}
   ];
@@ -64,6 +64,24 @@ function servicoRequerAgenda(codigo){ return !!servicoConfig(codigo)?.requerAgen
 function servicoSomenteDivulgacao(codigo){ return !!servicoConfig(codigo)?.somenteDivulgacao; }
 function servicoSomenteProfissional(codigo){ return !!servicoConfig(codigo)?.somenteProfissional; }
 function servicoUsaTransmissao(codigo){ return !!servicoConfig(codigo)?.usaTransmissao; }
+
+function normalizarServicosSolicitados(valor, tipoLegado=''){
+  let itens = Array.isArray(valor) ? valor : (valor ? [valor] : []);
+  if(!itens.length && tipoLegado) itens=[tipoLegado];
+  itens=itens.flatMap(c => String(c||'').trim()==='audesc_com_audiodescritor' ? ['audesc_transmissao','somente_audiodescritor'] : [String(c||'').trim()]);
+  const validos=new Set(SERVICOS_CONFIG.filter(s=>s.ativo!==false && s.codigo!=='audesc_com_audiodescritor').map(s=>s.codigo));
+  return [...new Set(itens.filter(c=>validos.has(c)))];
+}
+function servicosDoEvento(ev){return normalizarServicosSolicitados(ev?.servicos_solicitados, ev?.tipo_servico);}
+function eventoUsaTransmissao(ev){return servicosDoEvento(ev).some(servicoUsaTransmissao);}
+function eventoTemDivulgacao(ev){return servicosDoEvento(ev).includes('divulgacao_gratuita');}
+function eventoRequerAgenda(ev){return servicosDoEvento(ev).some(servicoRequerAgenda);}
+function tipoServicoLegado(servicos){
+  const itens=normalizarServicosSolicitados(servicos);
+  if(itens.includes('audesc_transmissao') && itens.includes('somente_audiodescritor') && itens.length===2) return 'audesc_com_audiodescritor';
+  return itens.find(c=>c==='audesc_transmissao') || itens.find(c=>c==='divulgacao_gratuita') || itens[0] || 'audesc_transmissao';
+}
+function nomesServicosEvento(ev){return servicosDoEvento(ev).map(nomeServico);}
 
 function defaultFormularioConfig(){
   const codigos = listarTiposServicoValidos();
@@ -515,28 +533,25 @@ async function obterPrecoServico(tipoServico, moeda){
  }catch(e){console.warn('Preço de serviço indisponível:',e.message||e);return null;}
 }
 async function calcularValorBaseServico(ev, moeda){
- const tipo=text(ev.tipo_servico)||'audesc_transmissao';
+ const servicos=servicosDoEvento(ev);
  const duracao=Math.max(1,Number(ev.duracao_horas||1));
- const ouvintes=Math.max(10,Number(ev.max_ouvintes||10));
- if(servicoSomenteDivulgacao(tipo)){
-  const preco=await obterPrecoServico(tipo,moeda);
-  const valorServico=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
-  return {valor_original:arredondarValor(valorServico),ouvintes:null,duracao_horas:1,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_servico:valorServico}};
+ const detalhes=[];
+ let total=0;
+ let ouvintes=null;
+ for(const tipo of servicos){
+  if(tipo==='audesc_transmissao'){
+   const p=await obterPrecificacao(moeda,'audesc_transmissao');
+   const pacote=calcularValorPacote(ev,p);
+   total+=numeroSeguro(pacote.valor_original,0); ouvintes=pacote.ouvintes;
+   detalhes.push({tipo_servico:tipo,descricao:nomeServico(tipo),valor:pacote.valor_original});
+  }else{
+   const preco=await obterPrecoServico(tipo,moeda);
+   const base=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
+   const valor=servicoRequerAgenda(tipo)?arredondarValor(base*duracao):arredondarValor(base);
+   total+=valor; detalhes.push({tipo_servico:tipo,descricao:nomeServico(tipo),valor,valor_unitario:base});
+  }
  }
- if(servicoSomenteProfissional(tipo)){
-  const preco=await obterPrecoServico(tipo,moeda);
-  const valorHora=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
-  return {valor_original:arredondarValor(valorHora*duracao),ouvintes:null,duracao_horas:duracao,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_hora:valorHora}};
- }
- if(tipo==='audesc_com_audiodescritor'){
-  const pAud=await obterPrecificacao(moeda,'audesc_transmissao');
-  const pacoteAud=calcularValorPacote(ev,pAud);
-  const pAd=await obterPrecoServico('somente_audiodescritor',moeda);
-  const valorHoraAd=pAd?numeroSeguro(pAd.valor_hora,pAd.valor_base_10_ouvintes_1_hora):0;
-  const valorAd=arredondarValor(valorHoraAd*duracao);
-  return {valor_original:arredondarValor(pacoteAud.valor_original+valorAd),ouvintes:pacoteAud.ouvintes,duracao_horas:pacoteAud.duracao_horas,tipo_servico:tipo,detalhes:{descricao:nomeServico(tipo),valor_audesc:pacoteAud.valor_original,valor_audiodescritor:valorAd,valor_hora_audiodescritor:valorHoraAd}};
- }
- return null;
+ return {valor_original:arredondarValor(total),ouvintes,duracao_horas:duracao,servicos_solicitados:servicos,tipo_servico:tipoServicoLegado(servicos),detalhes:{itens:detalhes,descricao:detalhes.map(d=>d.descricao).join(' + ')}};
 }
 
 
@@ -1354,7 +1369,7 @@ app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',versi
 
 const SERVICOS_COM_AGENDA = SERVICOS_CONFIG.filter(s => s.ativo !== false && s.requerAgenda).map(s => s.codigo);
 function requerAgendaProfissional(ev){
-  return servicoRequerAgenda(String(ev?.tipo_servico || '').trim());
+  return eventoRequerAgenda(ev);
 }
 function statusAgendaEvento(ev){
   if(!requerAgendaProfissional(ev)) return 'nao_aplicavel';
@@ -1371,7 +1386,7 @@ function mensagemAgenda(ev){
 }
 
 async function statusPagamentoInicial(ev){
-  if(servicoSomenteDivulgacao(String(ev?.tipo_servico || '').trim())){
+  if(eventoTemDivulgacao(ev)){
     const dados = await calcularPagamentoEvento(ev, '');
     return dados.valor_final > 0 ? 'pendente' : 'dispensado';
   }
@@ -1379,7 +1394,7 @@ async function statusPagamentoInicial(ev){
 }
 
 async function sincronizarStatusPagamentoDivulgacao(ev){
-  if(!ev || !servicoSomenteDivulgacao(String(ev.tipo_servico || '').trim())) return ev;
+  if(!ev || !eventoTemDivulgacao(ev)) return ev;
   if(ev.status_pagamento === 'pago') return ev;
   const statusCalculado = await statusPagamentoInicial(ev);
   if(ev.status_pagamento === statusCalculado) return ev;
@@ -1412,8 +1427,10 @@ app.post('/criar-evento', async (req,res)=>{
   if(await emailBloqueado(user.email)) return res.status(403).json({error:'Este e-mail está bloqueado para cadastro de eventos.'});
   const usuarioConfiavel = await emailConfiavel(user.email);
   const tiposServicoValidos=listarTiposServicoValidos();
-  const tipoSolicitado=text(b.tipo_servico);
-  const tipo_servico=tiposServicoValidos.includes(tipoSolicitado)?tipoSolicitado:'audesc_transmissao';
+  const servicos_solicitados=normalizarServicosSolicitados(b.servicos_solicitados, b.tipo_servico);
+  if(!servicos_solicitados.length) return res.status(400).json({error:'Selecione pelo menos um serviço.'});
+  if(servicos_solicitados.includes('audesc_transmissao') && servicos_solicitados.includes('divulgacao_gratuita')) return res.status(400).json({error:'Transmissão Audesc e Somente divulgação no Audesc não podem ser selecionados simultaneamente.'});
+  const tipo_servico=tipoServicoLegado(servicos_solicitados);
   const tipo_evento=text(b.tipo_evento)==='publico'?'publico':'privado';
   const divulgar_acesso_ouvintes = tipo_evento === 'publico' && (b.divulgar_acesso_ouvintes === true || text(b.divulgar_acesso_ouvintes) === 'true');
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
@@ -1429,17 +1446,23 @@ app.post('/criar-evento', async (req,res)=>{
   const dataEventoNormalizada = prepararDataEvento(b.data_evento, timezoneEvento);
   const formularioCfg = await obterFormularioConfig();
   const localCfg = resolverFormularioConfigParaLocal(formularioCfg, paisCodigoEvento, unidadeCodigoEvento);
-  if(Array.isArray(localCfg.servicosDisponiveis) && !localCfg.servicosDisponiveis.includes(tipo_servico)){
-    return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
+  if(Array.isArray(localCfg.servicosDisponiveis)){
+    const indisponiveis=servicos_solicitados.filter(c=>!localCfg.servicosDisponiveis.includes(c));
+    if(indisponiveis.length) return res.status(400).json({error:'Um ou mais serviços selecionados não estão disponíveis para o país e a unidade administrativa selecionados.'});
   }
   const camposCfg = localCfg.campos || {};
   const titulo = validarTextoConfigurado(b.titulo_original, 'o nome do evento', localCfg.limites?.titulo_original, true);
   const descricaoObrigatoria = !!camposCfg.descricao_original?.obrigatorio;
   const descricaoOriginal = validarTextoConfigurado(b.descricao_original, 'a descrição do evento', localCfg.limites?.descricao_original, descricaoObrigatoria);
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao:(tipo_evento==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:SERVICOS_COM_AGENDA.includes(tipo_servico)?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const temTransmissao=servicos_solicitados.includes('audesc_transmissao');
+  const temDivulgacao=servicos_solicitados.includes('divulgacao_gratuita');
+  const temProfissional=servicos_solicitados.some(servicoRequerAgenda);
+  const tipoEventoFinal=temDivulgacao?'publico':tipo_evento;
+  const divulgarFinal=temDivulgacao?false:divulgar_acesso_ouvintes;
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:(tipoEventoFinal==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: origemTransmissaoEvento,
-      data_evento:dataEventoNormalizada,duracao_horas,max_ouvintes};
+      data_evento:dataEventoNormalizada,duracao_horas:(temTransmissao||temProfissional)?duracao_horas:null,max_ouvintes:temTransmissao?max_ouvintes:null};
   ev.status_pagamento = await statusPagamentoInicial(ev);
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
@@ -1809,8 +1832,8 @@ async function liberar(req,res){
   if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
   if(ev.status_publicacao!=='aprovado') return res.status(400).json({error:'Evento ainda não está aprovado.'});
   const evSincronizado = await sincronizarStatusPagamentoDivulgacao(ev);
-  if((servicoUsaTransmissao(evSincronizado.tipo_servico) || servicoSomenteDivulgacao(evSincronizado.tipo_servico)) && evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
-  if(servicoSomenteDivulgacao(evSincronizado.tipo_servico)){
+  if((eventoUsaTransmissao(evSincronizado) || eventoTemDivulgacao(evSincronizado)) && evSincronizado.status_pagamento!=='pago' && evSincronizado.status_pagamento!=='dispensado') return res.status(400).json({error:'Evento ainda não consta como pago.'});
+  if(eventoTemDivulgacao(evSincronizado)){
    const {data:up,error:er}=await sb.from('eventos').update({status_operacao:'liberado',data_ultima_edicao:new Date().toISOString()}).eq('id',req.params.id).select().single();
    if(er) throw er; return res.json({ok:true,tipo:'divulgacao_gratuita',evento:up});
   }
@@ -1861,7 +1884,7 @@ app.post('/admin/eventos/:id/regerar-ordem', async (req,res)=>{
     const sb=getSupabase();
     const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
     if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
-    if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
+    if(!eventoUsaTransmissao(ev)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
     const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
     const sala = ev.sala_codigo || await gerarSalaUnica(sb);
     const {data:up,error:er}=await sb.from('eventos').update({
@@ -1907,7 +1930,7 @@ app.post('/admin/eventos/:id/sincronizar-planilha', async (req,res)=>{
     const sb=getSupabase();
     const {data:ev,error}=await sb.from('eventos').select('*').eq('id',req.params.id).single();
     if(error||!ev) return res.status(404).json({error:'Evento não encontrado.'});
-    if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
+    if(!eventoUsaTransmissao(ev)) return res.status(400).json({error:'Este serviço não utiliza transmissão Audesc.'});
     const senha = ev.senha_transmissor || await gerarSenhaUnica(sb);
     const sala = ev.sala_codigo || await gerarSalaUnica(sb);
     let eventoParaPlanilha = ev;
@@ -2159,8 +2182,8 @@ app.get('/admin/agenda-pendencias', async (req,res)=>{
   const sb=getSupabase();
   const {data,error}=await sb
    .from('eventos')
-   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,valor_sugerido_agenda,valor_final_agenda,valor_agenda_definido_por_admin,status_pagamento,status_publicacao,status_operacao,created_at')
-   .in('tipo_servico', SERVICOS_COM_AGENDA)
+   .select('id,titulo_original,titulo_publicado,email_usuario,tipo_servico,servicos_solicitados,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,data_evento,status_agenda,observacao_agenda,valor_sugerido_agenda,valor_final_agenda,valor_agenda_definido_por_admin,status_pagamento,status_publicacao,status_operacao,created_at')
+   .neq('status_agenda','nao_aplicavel')
    .order('created_at',{ascending:false})
    .limit(300);
   if(error) throw error;
@@ -2783,7 +2806,7 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -2846,7 +2869,7 @@ app.post('/admin/eventos/:id/reenviar-email', async (req,res)=>{
   const {data:ev,error}=await getSupabase().from('eventos').select('*').eq('id',req.params.id).single();
   if(error) throw error;
   if(!ev) return res.status(404).json({error:'Evento não encontrado.'});
-  if(!servicoUsaTransmissao(ev.tipo_servico)) return res.status(400).json({error:'Este evento não é de transmissão Audesc.'});
+  if(!eventoUsaTransmissao(ev)) return res.status(400).json({error:'Este evento não é de transmissão Audesc.'});
   if(!ev.sala_codigo || !ev.senha_transmissor) return res.status(400).json({error:'Evento ainda não possui sala e senha. Libere o evento antes de reenviar o e-mail.'});
 
   const email_resultado = await enviarEmailLiberacao(ev, ev.senha_transmissor, ev.sala_codigo).catch(err => {
@@ -3138,7 +3161,7 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   if(error) throw error;
   if(!ev) throw new Error('Evento não encontrado para liberação automática.');
 
-  if(!servicoUsaTransmissao(ev.tipo_servico)){
+  if(!eventoUsaTransmissao(ev)){
     console.log('PÓS-PAGAMENTO: evento não é de transmissão Audesc. Não será gerada sala.', eventoId);
     return { ok:false, skipped:true, reason:'Evento não é de transmissão Audesc.' };
   }
@@ -3483,7 +3506,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','servicos_solicitados','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -3507,7 +3530,18 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   }
   if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
   if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = (update.tipo_evento || ev.tipo_evento) === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
-  if(Object.prototype.hasOwnProperty.call(update,'tipo_servico')){
+  if(Object.prototype.hasOwnProperty.call(update,'servicos_solicitados')){
+   const selecionados=normalizarServicosSolicitados(update.servicos_solicitados, update.tipo_servico || ev.tipo_servico);
+   if(!selecionados.length) return res.status(400).json({error:'Selecione pelo menos um serviço.'});
+   if(selecionados.includes('audesc_transmissao') && selecionados.includes('divulgacao_gratuita')) return res.status(400).json({error:'Transmissão Audesc e Somente divulgação no Audesc não podem ser selecionados simultaneamente.'});
+   update.servicos_solicitados=selecionados;
+   update.tipo_servico=tipoServicoLegado(selecionados);
+   update.status_agenda=selecionados.some(servicoRequerAgenda)?'pendente':'nao_aplicavel';
+   if(!selecionados.includes('audesc_transmissao')) update.max_ouvintes=null;
+   if(!selecionados.includes('audesc_transmissao') && !selecionados.some(servicoRequerAgenda)) update.duracao_horas=null;
+   if(selecionados.includes('divulgacao_gratuita')){update.tipo_evento='publico'; update.divulgar_acesso_ouvintes=false;}
+  }
+  if(Object.prototype.hasOwnProperty.call(update,'tipo_servico') && !Object.prototype.hasOwnProperty.call(update,'servicos_solicitados')){
    const tiposServicoValidos=listarTiposServicoValidos();
    const tipoSolicitado=text(update.tipo_servico);
    update.tipo_servico = tiposServicoValidos.includes(tipoSolicitado) ? tipoSolicitado : (ev.tipo_servico || 'audesc_transmissao');
@@ -3535,17 +3569,19 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo') || Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezonePorLocal(update.pais_codigo || paisCodigoEdicao, update.unidade_codigo || unidadeCodigoEdicao, paisParaTimezoneUsuario);
   if(Object.prototype.hasOwnProperty.call(update,'data_evento')) update.data_evento = prepararDataEvento(update.data_evento, update.timezone || ev.timezone);
   if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
-  const tipoServicoFinal = update.tipo_servico || ev.tipo_servico;
+  const servicosFinais = normalizarServicosSolicitados(update.servicos_solicitados, update.tipo_servico || ev.tipo_servico);
   const paisCodigoFinal = update.pais_codigo || paisCodigoEdicao;
   const unidadeCodigoFinal = update.unidade_codigo || unidadeCodigoEdicao;
   const localCfgFinal = resolverFormularioConfigParaLocal(formularioCfgEdicao, paisCodigoFinal, unidadeCodigoFinal);
   const houveMudancaDeServicoOuLocal = Object.prototype.hasOwnProperty.call(update,'tipo_servico') ||
+   Object.prototype.hasOwnProperty.call(update,'servicos_solicitados') ||
    Object.prototype.hasOwnProperty.call(update,'pais') ||
    Object.prototype.hasOwnProperty.call(update,'uf') ||
    Object.prototype.hasOwnProperty.call(update,'pais_codigo') ||
    Object.prototype.hasOwnProperty.call(update,'unidade_codigo');
-  if(houveMudancaDeServicoOuLocal && Array.isArray(localCfgFinal.servicosDisponiveis) && !localCfgFinal.servicosDisponiveis.includes(tipoServicoFinal)){
-   return res.status(400).json({error:'Este tipo de solicitação não está disponível para o país e a unidade administrativa selecionados.'});
+  if(houveMudancaDeServicoOuLocal && Array.isArray(localCfgFinal.servicosDisponiveis)){
+   const indisponiveis=servicosFinais.filter(c=>!localCfgFinal.servicosDisponiveis.includes(c));
+   if(indisponiveis.length) return res.status(400).json({error:'Um ou mais serviços selecionados não estão disponíveis para o país e a unidade administrativa selecionados.'});
   }
   update.titulo_publicado = update.titulo_original || ev.titulo_publicado || ev.titulo_original;
   update.descricao_publicada = Object.prototype.hasOwnProperty.call(update,'descricao_original') ? update.descricao_original : (ev.descricao_publicada || ev.descricao_original);
