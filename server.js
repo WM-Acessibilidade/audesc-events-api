@@ -105,6 +105,20 @@ function normalizarCategoriaEvento(valor){
   return CATEGORIAS_EVENTO_VALIDAS.has(codigo) ? codigo : null;
 }
 
+const CLASSIFICACOES_ETARIAS = Object.freeze([
+  {codigo:'livre',nome:'Livre'},
+  {codigo:'10',nome:'10 anos'},
+  {codigo:'12',nome:'12 anos'},
+  {codigo:'14',nome:'14 anos'},
+  {codigo:'16',nome:'16 anos'},
+  {codigo:'18',nome:'18 anos'}
+]);
+const CLASSIFICACOES_ETARIAS_VALIDAS = new Set(CLASSIFICACOES_ETARIAS.map(c=>c.codigo));
+function normalizarClassificacaoEtaria(valor){
+  const codigo=limit(valor,20);
+  return CLASSIFICACOES_ETARIAS_VALIDAS.has(codigo) ? codigo : null;
+}
+
 function defaultFormularioConfig(){
   const codigos = listarTiposServicoValidos();
   const basicos = codigos.filter(c => c === 'audesc_transmissao' || c === 'divulgacao_gratuita');
@@ -117,6 +131,7 @@ function defaultFormularioConfig(){
       campos: {
         descricao_original: { visivel: true, obrigatorio: false },
         categoria_evento: { visivel: true, obrigatorio: true },
+        classificacao_etaria: { visivel: true, obrigatorio: false },
         tipo_evento: { visivel: true, obrigatorio: true },
         divulgar_acesso_ouvintes: { visivel: true, obrigatorio: false },
         data_evento: { visivel: true, obrigatorio: false },
@@ -1481,12 +1496,16 @@ app.post('/criar-evento', async (req,res)=>{
   const categoriaEvento = categoriaCfg.visivel === false ? null : normalizarCategoriaEvento(b.categoria_evento);
   if(categoriaCfg.visivel !== false && categoriaCfg.obrigatorio && !categoriaEvento) return res.status(400).json({error:'Selecione a categoria do evento.'});
   if(categoriaCfg.visivel !== false && b.categoria_evento && !categoriaEvento) return res.status(400).json({error:'Categoria do evento inválida.'});
+  const classificacaoCfg = camposCfg.classificacao_etaria || {visivel:true,obrigatorio:false};
+  const classificacaoEtaria = classificacaoCfg.visivel === false ? null : normalizarClassificacaoEtaria(b.classificacao_etaria);
+  if(classificacaoCfg.visivel !== false && classificacaoCfg.obrigatorio && !classificacaoEtaria) return res.status(400).json({error:'Selecione a classificação etária.'});
+  if(classificacaoCfg.visivel !== false && b.classificacao_etaria && !classificacaoEtaria) return res.status(400).json({error:'Classificação etária inválida.'});
   const temTransmissao=servicos_solicitados.includes('audesc_transmissao');
   const temDivulgacao=servicos_solicitados.includes('divulgacao_gratuita');
   const temProfissional=servicos_solicitados.some(servicoRequerAgenda);
   const tipoEventoFinal=temDivulgacao?'publico':tipo_evento;
   const divulgarFinal=temDivulgacao?false:divulgar_acesso_ouvintes;
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:(tipoEventoFinal==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,categoria_evento:categoriaEvento,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:(tipoEventoFinal==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,categoria_evento:categoriaEvento,classificacao_etaria:classificacaoEtaria,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: origemTransmissaoEvento,
       data_evento:dataEventoNormalizada,duracao_horas:(temTransmissao||temProfissional)?duracao_horas:null,max_ouvintes:temTransmissao?max_ouvintes:null};
@@ -2543,6 +2562,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'titulo_publicado',
       'descricao_publicada',
       'categoria_evento',
+      'classificacao_etaria',
       'site_oficial',
       'link_ingressos',
       'link_inscricao',
@@ -2590,6 +2610,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     }
     ['site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
     if(Object.prototype.hasOwnProperty.call(update,'categoria_evento')) { const categoria=normalizarCategoriaEvento(update.categoria_evento); if(update.categoria_evento && !categoria) return res.status(400).json({error:'Categoria do evento inválida.'}); update.categoria_evento=categoria; }
+    if(Object.prototype.hasOwnProperty.call(update,'classificacao_etaria')) { const classificacao=normalizarClassificacaoEtaria(update.classificacao_etaria); if(update.classificacao_etaria && !classificacao) return res.status(400).json({error:'Classificação etária inválida.'}); update.classificacao_etaria=classificacao; }
     if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
     if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = update.tipo_evento === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
     if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,500);
@@ -2835,7 +2856,7 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,categoria_evento,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,categoria_evento,classificacao_etaria,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -3535,7 +3556,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','categoria_evento','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','servicos_solicitados','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','categoria_evento','classificacao_etaria','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','servicos_solicitados','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -3555,6 +3576,16 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
     if(categoriaCfgEdicao.obrigatorio && !categoria) return res.status(400).json({error:'Selecione a categoria do evento.'});
     if(update.categoria_evento && !categoria) return res.status(400).json({error:'Categoria do evento inválida.'});
     update.categoria_evento=categoria;
+   }
+  }
+  if(Object.prototype.hasOwnProperty.call(update,'classificacao_etaria')){
+   const classificacaoCfgEdicao=localCfgEdicao.campos?.classificacao_etaria || {visivel:true,obrigatorio:false};
+   if(classificacaoCfgEdicao.visivel === false){ delete update.classificacao_etaria; }
+   else {
+    const classificacao=normalizarClassificacaoEtaria(update.classificacao_etaria);
+    if(classificacaoCfgEdicao.obrigatorio && !classificacao) return res.status(400).json({error:'Selecione a classificação etária.'});
+    if(update.classificacao_etaria && !classificacao) return res.status(400).json({error:'Classificação etária inválida.'});
+    update.classificacao_etaria=classificacao;
    }
   }
   if(Object.prototype.hasOwnProperty.call(update,'descricao_original')){
