@@ -83,6 +83,28 @@ function tipoServicoLegado(servicos){
 }
 function nomesServicosEvento(ev){return servicosDoEvento(ev).map(nomeServico);}
 
+const CATEGORIAS_EVENTO = Object.freeze([
+  {codigo:'shows_musica',nome:'Shows e Música'},
+  {codigo:'teatro_espetaculos',nome:'Teatro e Espetáculos'},
+  {codigo:'standup_comedia',nome:'Stand-up e Comédia'},
+  {codigo:'exposicoes_artes',nome:'Exposições e Artes'},
+  {codigo:'feiras_mercados',nome:'Feiras e Mercados'},
+  {codigo:'gastronomia',nome:'Gastronomia'},
+  {codigo:'cursos_oficinas',nome:'Cursos e Oficinas'},
+  {codigo:'palestras_networking',nome:'Palestras e Networking'},
+  {codigo:'esportes',nome:'Esportes'},
+  {codigo:'religiao_espiritualidade',nome:'Religião e Espiritualidade'},
+  {codigo:'passeios_experiencias',nome:'Passeios e Experiências'},
+  {codigo:'festas_vida_noturna',nome:'Festas e Vida Noturna'},
+  {codigo:'institucional_cidadania',nome:'Institucional e Cidadania'},
+  {codigo:'outros',nome:'Outros'}
+]);
+const CATEGORIAS_EVENTO_VALIDAS = new Set(CATEGORIAS_EVENTO.map(c=>c.codigo));
+function normalizarCategoriaEvento(valor){
+  const codigo=limit(valor,80);
+  return CATEGORIAS_EVENTO_VALIDAS.has(codigo) ? codigo : null;
+}
+
 function defaultFormularioConfig(){
   const codigos = listarTiposServicoValidos();
   const basicos = codigos.filter(c => c === 'audesc_transmissao' || c === 'divulgacao_gratuita');
@@ -94,6 +116,7 @@ function defaultFormularioConfig(){
       servicosDisponiveis: basicos.length ? basicos : todos,
       campos: {
         descricao_original: { visivel: true, obrigatorio: false },
+        categoria_evento: { visivel: true, obrigatorio: true },
         tipo_evento: { visivel: true, obrigatorio: true },
         divulgar_acesso_ouvintes: { visivel: true, obrigatorio: false },
         data_evento: { visivel: true, obrigatorio: false },
@@ -1364,7 +1387,7 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'v41-servicos-centralizados' }));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.1.0-fase-6.6-categorias' }));
 
 
 const SERVICOS_COM_AGENDA = SERVICOS_CONFIG.filter(s => s.ativo !== false && s.requerAgenda).map(s => s.codigo);
@@ -1454,12 +1477,16 @@ app.post('/criar-evento', async (req,res)=>{
   const titulo = validarTextoConfigurado(b.titulo_original, 'o nome do evento', localCfg.limites?.titulo_original, true);
   const descricaoObrigatoria = !!camposCfg.descricao_original?.obrigatorio;
   const descricaoOriginal = validarTextoConfigurado(b.descricao_original, 'a descrição do evento', localCfg.limites?.descricao_original, descricaoObrigatoria);
+  const categoriaCfg = camposCfg.categoria_evento || {visivel:true,obrigatorio:true};
+  const categoriaEvento = categoriaCfg.visivel === false ? null : normalizarCategoriaEvento(b.categoria_evento);
+  if(categoriaCfg.visivel !== false && categoriaCfg.obrigatorio && !categoriaEvento) return res.status(400).json({error:'Selecione a categoria do evento.'});
+  if(categoriaCfg.visivel !== false && b.categoria_evento && !categoriaEvento) return res.status(400).json({error:'Categoria do evento inválida.'});
   const temTransmissao=servicos_solicitados.includes('audesc_transmissao');
   const temDivulgacao=servicos_solicitados.includes('divulgacao_gratuita');
   const temProfissional=servicos_solicitados.some(servicoRequerAgenda);
   const tipoEventoFinal=temDivulgacao?'publico':tipo_evento;
   const divulgarFinal=temDivulgacao?false:divulgar_acesso_ouvintes;
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:(tipoEventoFinal==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:(tipoEventoFinal==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,categoria_evento:categoriaEvento,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: origemTransmissaoEvento,
       data_evento:dataEventoNormalizada,duracao_horas:(temTransmissao||temProfissional)?duracao_horas:null,max_ouvintes:temTransmissao?max_ouvintes:null};
@@ -1961,7 +1988,7 @@ app.post('/admin/eventos/:id/sincronizar-planilha', async (req,res)=>{
 app.get('/formulario-config', async (req,res)=>{
   try{
     const cfg = await obterFormularioConfig();
-    res.json({ok:true,config:cfg,servicos:SERVICOS_CONFIG});
+    res.json({ok:true,config:cfg,servicos:SERVICOS_CONFIG,categorias_evento:CATEGORIAS_EVENTO});
   }catch(e){
     res.status(500).json({error:e.message || 'Erro ao carregar configuração do formulário.'});
   }
@@ -1971,7 +1998,7 @@ app.get('/admin/formulario-config', async (req,res)=>{
   try{
     if(!admin(req,res)) return;
     const cfg = await obterFormularioConfig();
-    res.json({ok:true,config:cfg,servicos:SERVICOS_CONFIG});
+    res.json({ok:true,config:cfg,servicos:SERVICOS_CONFIG,categorias_evento:CATEGORIAS_EVENTO});
   }catch(e){
     res.status(500).json({error:e.message || 'Erro ao carregar configuração do formulário.'});
   }
@@ -2515,6 +2542,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'status_operacao',
       'titulo_publicado',
       'descricao_publicada',
+      'categoria_evento',
       'site_oficial',
       'link_ingressos',
       'link_inscricao',
@@ -2561,6 +2589,7 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       }
     }
     ['site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
+    if(Object.prototype.hasOwnProperty.call(update,'categoria_evento')) { const categoria=normalizarCategoriaEvento(update.categoria_evento); if(update.categoria_evento && !categoria) return res.status(400).json({error:'Categoria do evento inválida.'}); update.categoria_evento=categoria; }
     if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
     if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = update.tipo_evento === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
     if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,500);
@@ -2806,7 +2835,7 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,categoria_evento,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -3506,7 +3535,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','servicos_solicitados','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','categoria_evento','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','servicos_solicitados','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -3517,6 +3546,16 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   const localCfgEdicao = resolverFormularioConfigParaLocal(formularioCfgEdicao, paisCodigoEdicao, unidadeCodigoEdicao);
   if(Object.prototype.hasOwnProperty.call(update,'titulo_original')){
    update.titulo_original = validarTextoConfigurado(update.titulo_original, 'o nome do evento', localCfgEdicao.limites?.titulo_original, true);
+  }
+  if(Object.prototype.hasOwnProperty.call(update,'categoria_evento')){
+   const categoriaCfgEdicao=localCfgEdicao.campos?.categoria_evento || {visivel:true,obrigatorio:true};
+   if(categoriaCfgEdicao.visivel === false){ delete update.categoria_evento; }
+   else {
+    const categoria=normalizarCategoriaEvento(update.categoria_evento);
+    if(categoriaCfgEdicao.obrigatorio && !categoria) return res.status(400).json({error:'Selecione a categoria do evento.'});
+    if(update.categoria_evento && !categoria) return res.status(400).json({error:'Categoria do evento inválida.'});
+    update.categoria_evento=categoria;
+   }
   }
   if(Object.prototype.hasOwnProperty.call(update,'descricao_original')){
    const descricaoObrigatoriaEdicao = !!localCfgEdicao.campos?.descricao_original?.obrigatorio;

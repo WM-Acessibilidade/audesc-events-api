@@ -1,6 +1,6 @@
 {
   "name": "audesc-events-api",
-  "version": "21.0.0",
+  "version": "21.1.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
