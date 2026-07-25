@@ -1820,24 +1820,27 @@ async function enviarNotificacaoAgendaSeNecessario(evAntes, evDepois){
   return result;
 }
 
+function codigoPaisNormalizado(valor, codigoAlternativo=''){
+  return text(codigoAlternativo || codigoPaisMaps(valor) || valor).toUpperCase();
+}
 function inscritoCompatívelComEvento(inscrito, ev){
   if(!inscrito || !inscrito.email || inscrito.ativo !== true || inscrito.email_validado !== true) return false;
   if(inscrito.receber_todos === true) return true;
-  const paisEventoNome=text(ev.pais);
-  const paisEvento=text(ev.pais_codigo||codigoPaisMaps(paisEventoNome)).toUpperCase();
-  const paisInscritoNome=text(inscrito.pais);
-  const paisInscrito=text(inscrito.pais_codigo||codigoPaisMaps(paisInscritoNome)).toUpperCase();
-  const abrangencia=text(ev.abrangencia_divulgacao);
+  const paisEvento=codigoPaisNormalizado(ev.pais,ev.pais_codigo);
+  const paisInscrito=codigoPaisNormalizado(inscrito.pais,inscrito.pais_codigo);
+  const abrangencia=text(ev.abrangencia_divulgacao).toLowerCase();
   if(abrangencia==='internacional'){
-    const destinos=normalizarPaisesDivulgacao(ev.paises_divulgacao).map(p=>text(codigoPaisMaps(p)||p).toUpperCase());
-    if(paisInscrito && !destinos.includes(paisInscrito) && !destinos.includes(paisInscritoNome.toUpperCase())) return false;
-  }else if(paisEvento && paisInscrito && paisEvento!==paisInscrito){return false;}
-  if(abrangencia!=='nacional'&&abrangencia!=='internacional'){
-    const unidadeEvento=text(ev.unidade_codigo||codigoUnidadeLocal(paisEvento,ev.uf,ev.uf)).toUpperCase();
-    const unidadeInscrito=text(inscrito.unidade_codigo||codigoUnidadeLocal(paisInscrito,inscrito.uf,inscrito.uf)).toUpperCase();
-    if(unidadeEvento&&unidadeInscrito&&unidadeInscrito!=='NACIONAL'&&unidadeEvento!==unidadeInscrito)return false;
+    const destinos=new Set(normalizarPaisesDivulgacao(ev.paises_divulgacao).map(p=>codigoPaisNormalizado(p)).filter(Boolean));
+    if(!paisInscrito || !destinos.has(paisInscrito)) return false;
+  }else{
+    if(!paisEvento || !paisInscrito || paisEvento!==paisInscrito) return false;
+    if(abrangencia!=='nacional'){
+      const unidadeEvento=text(ev.unidade_codigo||codigoUnidadeLocal(paisEvento,ev.uf,ev.uf)).toUpperCase();
+      const unidadeInscrito=text(inscrito.unidade_codigo||codigoUnidadeLocal(paisInscrito,inscrito.uf,inscrito.uf)).toUpperCase();
+      if(unidadeEvento&&unidadeInscrito&&unidadeInscrito!=='NACIONAL'&&unidadeEvento!==unidadeInscrito)return false;
+    }
   }
-  if(Array.isArray(inscrito.eventos_ids)&&inscrito.eventos_ids.length)return inscrito.eventos_ids.includes(ev.id);
+  if(Array.isArray(inscrito.eventos_ids)&&inscrito.eventos_ids.length)return inscrito.eventos_ids.map(String).includes(String(ev.id));
   return true;
 }
 
