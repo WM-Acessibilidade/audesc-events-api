@@ -119,6 +119,13 @@ function normalizarClassificacaoEtaria(valor){
   return CLASSIFICACOES_ETARIAS_VALIDAS.has(codigo) ? codigo : null;
 }
 
+
+const MODALIDADES_EVENTO_VALIDAS = new Set(['presencial','distancia','hibrido']);
+const ABRANGENCIAS_DIVULGACAO_VALIDAS = new Set(['nacional','internacional']);
+function normalizarModalidadeEvento(valor){const v=limit(valor,20);return MODALIDADES_EVENTO_VALIDAS.has(v)?v:'presencial';}
+function normalizarAbrangenciaDivulgacao(valor, modalidade){if(modalidade==='presencial')return null;const v=limit(valor,20);return ABRANGENCIAS_DIVULGACAO_VALIDAS.has(v)?v:null;}
+function normalizarPaisesDivulgacao(valor){const arr=Array.isArray(valor)?valor:[];return [...new Set(arr.map(v=>limit(v,100)).filter(Boolean))].slice(0,100);}
+
 function defaultFormularioConfig(){
   const codigos = listarTiposServicoValidos();
   const basicos = codigos.filter(c => c === 'audesc_transmissao' || c === 'divulgacao_gratuita');
@@ -132,6 +139,9 @@ function defaultFormularioConfig(){
         descricao_original: { visivel: true, obrigatorio: false },
         categoria_evento: { visivel: true, obrigatorio: true },
         classificacao_etaria: { visivel: true, obrigatorio: false },
+        modalidade_evento: { visivel: true, obrigatorio: true },
+        abrangencia_divulgacao: { visivel: true, obrigatorio: true },
+        paises_divulgacao: { visivel: true, obrigatorio: true },
         tipo_evento: { visivel: true, obrigatorio: true },
         divulgar_acesso_ouvintes: { visivel: true, obrigatorio: false },
         data_evento: { visivel: true, obrigatorio: false },
@@ -326,7 +336,7 @@ async function getSheets(){
     key:GOOGLE_PRIVATE_KEY,
     scopes:['https://www.googleapis.com/auth/spreadsheets']
   });
-  return google.sheets({version:'v4',auth});
+  return google.sheets({version:'21.3.0-fase-6.8-modalidade-abrangencia',auth});
 }
 function endDate(start,hours){ const d=start?new Date(start):new Date(); return new Date(d.getTime()+Number(hours||2)*3600000).toISOString(); }
 function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -1473,10 +1483,19 @@ app.post('/criar-evento', async (req,res)=>{
   const divulgar_acesso_ouvintes = tipo_evento === 'publico' && (b.divulgar_acesso_ouvintes === true || text(b.divulgar_acesso_ouvintes) === 'true');
   const duracao_horas=Math.max(1,Math.min(8,Number(b.duracao_horas||2)));
   const max_ouvintes=Math.max(10,Math.min(500,Number(b.max_ouvintes||20)));
-  const paisEvento = text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais);
-  const ufEvento = (text(b.pais)==='Outros' || text(b.pais)==='Internacional') ? '' : text(b.uf);
-  const origemTransmissaoEvento = text(b.pais)==='Internacional' ? text(b.origem_transmissao) : '';
-  const paisReferenciaTimezone = text(b.pais)==='Internacional' ? origemTransmissaoEvento : paisEvento;
+  let paisEvento = text(b.pais)==='Outros' ? text(b.pais_outro) : text(b.pais);
+  let ufEvento = text(b.pais)==='Outros' ? '' : text(b.uf);
+  let modalidadeEvento=normalizarModalidadeEvento(b.modalidade_evento);
+  let abrangenciaDivulgacao=normalizarAbrangenciaDivulgacao(b.abrangencia_divulgacao,modalidadeEvento);
+  let paisesDivulgacao=normalizarPaisesDivulgacao(b.paises_divulgacao);
+  // Compatibilidade com registros/formulários antigos.
+  if(text(b.pais)==='Internacional'){paisEvento=text(b.origem_transmissao)||'Brasil';ufEvento='';modalidadeEvento='distancia';abrangenciaDivulgacao='internacional';}
+  if(ufEvento==='Nacional'){ufEvento='';modalidadeEvento='distancia';abrangenciaDivulgacao='nacional';}
+  if(modalidadeEvento!=='presencial'&&!abrangenciaDivulgacao) return res.status(400).json({error:'Selecione a abrangência da divulgação.'});
+  if(abrangenciaDivulgacao==='internacional'&&!paisesDivulgacao.length) return res.status(400).json({error:'Selecione pelo menos um país para a divulgação internacional.'});
+  if(abrangenciaDivulgacao!=='internacional') paisesDivulgacao=[];
+  const origemTransmissaoEvento = '';
+  const paisReferenciaTimezone = paisEvento;
   const paisCodigoEvento = limit(b.pais_codigo || b.paisCodigo || codigoPaisMaps(paisReferenciaTimezone || paisEvento),10);
   const unidadeCodigoEvento = limit(b.unidade_codigo || b.unidadeCodigo || codigoUnidadeLocal(paisCodigoEvento, ufEvento, b.ufTexto),20);
   const timezoneCalculadoEvento = timezonePorLocal(paisCodigoEvento, unidadeCodigoEvento, paisReferenciaTimezone || paisEvento);
@@ -1505,7 +1524,7 @@ app.post('/criar-evento', async (req,res)=>{
   const temProfissional=servicos_solicitados.some(servicoRequerAgenda);
   const tipoEventoFinal=temDivulgacao?'publico':tipo_evento;
   const divulgarFinal=temDivulgacao?false:divulgar_acesso_ouvintes;
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:(tipoEventoFinal==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,categoria_evento:categoriaEvento,classificacao_etaria:classificacaoEtaria,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:(tipoEventoFinal==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,categoria_evento:categoriaEvento,classificacao_etaria:classificacaoEtaria,modalidade_evento:modalidadeEvento,abrangencia_divulgacao:abrangenciaDivulgacao,paises_divulgacao:paisesDivulgacao,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: origemTransmissaoEvento,
       data_evento:dataEventoNormalizada,duracao_horas:(temTransmissao||temProfissional)?duracao_horas:null,max_ouvintes:temTransmissao?max_ouvintes:null};
@@ -1804,15 +1823,21 @@ async function enviarNotificacaoAgendaSeNecessario(evAntes, evDepois){
 function inscritoCompatívelComEvento(inscrito, ev){
   if(!inscrito || !inscrito.email || inscrito.ativo !== true || inscrito.email_validado !== true) return false;
   if(inscrito.receber_todos === true) return true;
-  const paisEvento = text(ev.pais_codigo || codigoPaisMaps(ev.pais)).toUpperCase();
-  const paisInscrito = text(inscrito.pais_codigo || codigoPaisMaps(inscrito.pais)).toUpperCase();
-  if(paisEvento && paisInscrito && paisEvento !== paisInscrito) return false;
-  const unidadeEvento = text(ev.unidade_codigo || codigoUnidadeLocal(paisEvento, ev.uf, ev.uf)).toUpperCase();
-  const unidadeInscrito = text(inscrito.unidade_codigo || codigoUnidadeLocal(paisInscrito, inscrito.uf, inscrito.uf)).toUpperCase();
-  if(unidadeEvento && unidadeInscrito && unidadeInscrito !== 'NACIONAL' && unidadeEvento !== unidadeInscrito) return false;
-  if(Array.isArray(inscrito.eventos_ids) && inscrito.eventos_ids.length){
-    return inscrito.eventos_ids.includes(ev.id);
+  const paisEventoNome=text(ev.pais);
+  const paisEvento=text(ev.pais_codigo||codigoPaisMaps(paisEventoNome)).toUpperCase();
+  const paisInscritoNome=text(inscrito.pais);
+  const paisInscrito=text(inscrito.pais_codigo||codigoPaisMaps(paisInscritoNome)).toUpperCase();
+  const abrangencia=text(ev.abrangencia_divulgacao);
+  if(abrangencia==='internacional'){
+    const destinos=normalizarPaisesDivulgacao(ev.paises_divulgacao).map(p=>text(codigoPaisMaps(p)||p).toUpperCase());
+    if(paisInscrito && !destinos.includes(paisInscrito) && !destinos.includes(paisInscritoNome.toUpperCase())) return false;
+  }else if(paisEvento && paisInscrito && paisEvento!==paisInscrito){return false;}
+  if(abrangencia!=='nacional'&&abrangencia!=='internacional'){
+    const unidadeEvento=text(ev.unidade_codigo||codigoUnidadeLocal(paisEvento,ev.uf,ev.uf)).toUpperCase();
+    const unidadeInscrito=text(inscrito.unidade_codigo||codigoUnidadeLocal(paisInscrito,inscrito.uf,inscrito.uf)).toUpperCase();
+    if(unidadeEvento&&unidadeInscrito&&unidadeInscrito!=='NACIONAL'&&unidadeEvento!==unidadeInscrito)return false;
   }
+  if(Array.isArray(inscrito.eventos_ids)&&inscrito.eventos_ids.length)return inscrito.eventos_ids.includes(ev.id);
   return true;
 }
 
@@ -2563,6 +2588,9 @@ app.patch('/admin/eventos/:id', async (req, res) => {
       'descricao_publicada',
       'categoria_evento',
       'classificacao_etaria',
+      'modalidade_evento',
+      'abrangencia_divulgacao',
+      'paises_divulgacao',
       'site_oficial',
       'link_ingressos',
       'link_inscricao',
@@ -2611,6 +2639,11 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     ['site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(update,k)) update[k]=safeUrl(update[k]); });
     if(Object.prototype.hasOwnProperty.call(update,'categoria_evento')) { const categoria=normalizarCategoriaEvento(update.categoria_evento); if(update.categoria_evento && !categoria) return res.status(400).json({error:'Categoria do evento inválida.'}); update.categoria_evento=categoria; }
     if(Object.prototype.hasOwnProperty.call(update,'classificacao_etaria')) { const classificacao=normalizarClassificacaoEtaria(update.classificacao_etaria); if(update.classificacao_etaria && !classificacao) return res.status(400).json({error:'Classificação etária inválida.'}); update.classificacao_etaria=classificacao; }
+    if(Object.prototype.hasOwnProperty.call(update,'modalidade_evento')) update.modalidade_evento=normalizarModalidadeEvento(update.modalidade_evento);
+    if(Object.prototype.hasOwnProperty.call(update,'abrangencia_divulgacao')) update.abrangencia_divulgacao=normalizarAbrangenciaDivulgacao(update.abrangencia_divulgacao,update.modalidade_evento||'presencial');
+    if(Object.prototype.hasOwnProperty.call(update,'paises_divulgacao')) update.paises_divulgacao=normalizarPaisesDivulgacao(update.paises_divulgacao);
+    if(update.abrangencia_divulgacao==='internacional'&&!update.paises_divulgacao?.length) return res.status(400).json({error:'Selecione pelo menos um país para a divulgação internacional.'});
+    if(update.abrangencia_divulgacao!=='internacional') update.paises_divulgacao=[];
     if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
     if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = update.tipo_evento === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
     if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,500);
@@ -2856,7 +2889,7 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
 
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,categoria_evento,classificacao_etaria,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,categoria_evento,classificacao_etaria,modalidade_evento,abrangencia_divulgacao,paises_divulgacao,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
@@ -3556,7 +3589,7 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
   if(ev.status_pagamento === 'pago' || ev.status_operacao === 'liberado'){
    return res.status(403).json({error:'Eventos pagos ou liberados não podem ser editados por esta página.'});
   }
-  const allowed = ['titulo_original','descricao_original','categoria_evento','classificacao_etaria','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','servicos_solicitados','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
+  const allowed = ['titulo_original','descricao_original','categoria_evento','classificacao_etaria','modalidade_evento','abrangencia_divulgacao','paises_divulgacao','site_oficial','link_ingressos','link_inscricao','link_programacao','link_acessibilidade','data_evento','duracao_horas','max_ouvintes','tipo_evento','divulgar_acesso_ouvintes','tipo_servico','servicos_solicitados','pais','uf','origem_transmissao','pais_codigo','unidade_codigo','timezone','cidade','local_evento','local_nome','local_endereco','google_place_id','local_pais_codigo','local_unidade_codigo','latitude','longitude'];
   const update = {};
   for(const key of allowed){
    if(Object.prototype.hasOwnProperty.call(req.body || {}, key)) update[key] = req.body[key];
@@ -3588,6 +3621,15 @@ app.patch('/meus-eventos/:id', async (req,res)=>{
     update.classificacao_etaria=classificacao;
    }
   }
+  if(Object.prototype.hasOwnProperty.call(update,'modalidade_evento')) update.modalidade_evento=normalizarModalidadeEvento(update.modalidade_evento);
+  const modalidadeFinal=update.modalidade_evento||ev.modalidade_evento||'presencial';
+  if(Object.prototype.hasOwnProperty.call(update,'abrangencia_divulgacao')) update.abrangencia_divulgacao=normalizarAbrangenciaDivulgacao(update.abrangencia_divulgacao,modalidadeFinal);
+  if(Object.prototype.hasOwnProperty.call(update,'paises_divulgacao')) update.paises_divulgacao=normalizarPaisesDivulgacao(update.paises_divulgacao);
+  const abrangenciaFinal=Object.prototype.hasOwnProperty.call(update,'abrangencia_divulgacao')?update.abrangencia_divulgacao:ev.abrangencia_divulgacao;
+  const paisesFinal=Object.prototype.hasOwnProperty.call(update,'paises_divulgacao')?update.paises_divulgacao:(ev.paises_divulgacao||[]);
+  if(modalidadeFinal!=='presencial'&&!abrangenciaFinal) return res.status(400).json({error:'Selecione a abrangência da divulgação.'});
+  if(abrangenciaFinal==='internacional'&&!paisesFinal.length) return res.status(400).json({error:'Selecione pelo menos um país para a divulgação internacional.'});
+  if(abrangenciaFinal!=='internacional') update.paises_divulgacao=[];
   if(Object.prototype.hasOwnProperty.call(update,'descricao_original')){
    const descricaoObrigatoriaEdicao = !!localCfgEdicao.campos?.descricao_original?.obrigatorio;
    update.descricao_original = validarTextoConfigurado(update.descricao_original, 'a descrição do evento', localCfgEdicao.limites?.descricao_original, descricaoObrigatoriaEdicao);
