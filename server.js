@@ -336,7 +336,7 @@ async function getSheets(){
     key:GOOGLE_PRIVATE_KEY,
     scopes:['https://www.googleapis.com/auth/spreadsheets']
   });
-  return google.sheets({version:'21.3.0-fase-6.8-modalidade-abrangencia',auth});
+  return google.sheets({version:'v4',auth});
 }
 function endDate(start,hours){ const d=start?new Date(start):new Date(); return new Date(d.getTime()+Number(hours||2)*3600000).toISOString(); }
 function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -2645,8 +2645,15 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'modalidade_evento')) update.modalidade_evento=normalizarModalidadeEvento(update.modalidade_evento);
     if(Object.prototype.hasOwnProperty.call(update,'abrangencia_divulgacao')) update.abrangencia_divulgacao=normalizarAbrangenciaDivulgacao(update.abrangencia_divulgacao,update.modalidade_evento||'presencial');
     if(Object.prototype.hasOwnProperty.call(update,'paises_divulgacao')) update.paises_divulgacao=normalizarPaisesDivulgacao(update.paises_divulgacao);
-    if(update.abrangencia_divulgacao==='internacional'&&!update.paises_divulgacao?.length) return res.status(400).json({error:'Selecione pelo menos um país para a divulgação internacional.'});
-    if(update.abrangencia_divulgacao!=='internacional') update.paises_divulgacao=[];
+    const alterouAbrangenciaAdmin = Object.prototype.hasOwnProperty.call(update,'abrangencia_divulgacao');
+    const alterouPaisesAdmin = Object.prototype.hasOwnProperty.call(update,'paises_divulgacao');
+    if(alterouAbrangenciaAdmin && update.abrangencia_divulgacao==='internacional' && alterouPaisesAdmin && !update.paises_divulgacao?.length){
+      return res.status(400).json({error:'Selecione pelo menos um país para a divulgação internacional.'});
+    }
+    // Em atualizações parciais (por exemplo, apenas aprovar ou liberar), não se deve
+    // apagar os países já salvos. A lista só é limpa quando a abrangência é
+    // explicitamente alterada para um valor diferente de internacional.
+    if(alterouAbrangenciaAdmin && update.abrangencia_divulgacao!=='internacional') update.paises_divulgacao=[];
     if(Object.prototype.hasOwnProperty.call(update,'tipo_evento')) update.tipo_evento = text(update.tipo_evento)==='publico'?'publico':'privado';
     if(Object.prototype.hasOwnProperty.call(update,'divulgar_acesso_ouvintes')) update.divulgar_acesso_ouvintes = update.tipo_evento === 'publico' && (update.divulgar_acesso_ouvintes === true || text(update.divulgar_acesso_ouvintes) === 'true');
     if(Object.prototype.hasOwnProperty.call(update,'local_evento')) update.local_evento = limit(update.local_evento,500);
