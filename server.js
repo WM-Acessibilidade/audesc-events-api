@@ -1378,7 +1378,13 @@ async function previsoesAutocompleteGoogle(query, codigoPais){
   const body={input:query,languageCode:'pt-BR'};
   if(codigoPais) body.includedRegionCodes=[String(codigoPais).toLowerCase()];
   const r=await fetch('https://places.googleapis.com/v1/places:autocomplete',{
-    method:'POST',headers:{'Content-Type':'application/json','X-Goog-Api-Key':GOOGLE_MAPS_API_KEY},body:JSON.stringify(body)
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
+      'X-Goog-FieldMask':'suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.placePrediction.structuredFormat.mainText.text,suggestions.placePrediction.structuredFormat.secondaryText.text'
+    },
+    body:JSON.stringify(body)
   });
   if(!r.ok){
     const detalhe=await r.text().catch(()=>'');
@@ -1416,6 +1422,46 @@ async function sugerirGooglePlaces(query, ctx){
   return resultados.slice(0,5).map(({_prioridade,...item})=>item);
 }
 
+async function sugerirNominatimLocais(query, ctx){
+  const resultados=[], vistos=new Set();
+  for(const consulta of montarVariantesConsultaLocal(query,ctx.pais,ctx.uf,ctx.ufTexto)){
+    let url='https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&accept-language=pt-BR&q='+encodeURIComponent(consulta);
+    if(ctx.codigoPais) url+='&countrycodes='+encodeURIComponent(ctx.codigoPais.toLowerCase());
+    const r=await fetch(url,{headers:{'User-Agent':'Audesc/1.0'}});
+    if(!r.ok) continue;
+    const lista=await r.json().catch(()=>[]);
+    for(const item of Array.isArray(lista)?lista:[]){
+      if(!resultadoNominatimDentro(item,ctx)) continue;
+      const lat=Number(item.lat), lon=Number(item.lon);
+      if(!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
+      const chave=String(item.place_id||item.osm_id||item.display_name||'');
+      if(!chave||vistos.has(chave)) continue;
+      vistos.add(chave);
+      const a=item.address||{};
+      const paisCodigo=String(a.country_code||ctx.codigoPais||'').toUpperCase();
+      const unidadeCodigo=String(a.state_code||(a['ISO3166-2-lvl4']||'').split('-').pop()||ctx.unidadeCodigo||'').toUpperCase();
+      const nome=String(item.name||item.display_name||consulta).trim();
+      const endereco=String(item.display_name||nome).trim();
+      resultados.push({
+        id:'nominatim-'+chave,
+        place_id:'',
+        nome,
+        endereco,
+        texto_completo:[nome,endereco&&endereco!==nome?endereco:''].filter(Boolean).join(' — '),
+        lat,lon,
+        provedor:'nominatim',
+        pais_nome:String(a.country||ctx.pais||'').trim(),
+        pais_codigo:paisCodigo,
+        unidade_nome:String(a.state||a.region||ctx.ufTexto||ctx.uf||'').trim(),
+        unidade_codigo:unidadeCodigo,
+        cidade:String(a.city||a.town||a.village||a.municipality||a.county||'').trim()
+      });
+      if(resultados.length>=5) return resultados;
+    }
+  }
+  return resultados;
+}
+
 app.get('/geocode/sugestoes', async (req,res)=>{
   try{
     const query=limit(req.query.q,300);
@@ -1428,7 +1474,10 @@ app.get('/geocode/sugestoes', async (req,res)=>{
     const codigoPais=(codigoPaisInformado || codigoPaisMaps(pais)).toUpperCase();
     const unidadeCodigo=(codigoUnidadeInformado || codigoUnidadeLocal(codigoPais,uf,ufTexto)).toUpperCase();
     const ctx={pais,uf,ufTexto,codigoPais,unidadeCodigo};
-    const resultados=await sugerirGooglePlaces(query,ctx);
+    let resultados=[];
+    try{ resultados=await sugerirGooglePlaces(query,ctx); }
+    catch(erroGoogle){ console.warn('Falha no Google Places Autocomplete; usando Nominatim:',erroGoogle?.message||erroGoogle); }
+    if(!resultados.length) resultados=await sugerirNominatimLocais(query,ctx);
     return res.json({ok:true,resultados});
   }catch(e){
     console.error('Erro ao sugerir locais:',e);
@@ -1460,7 +1509,7 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.4.0-fase-6.9-precificacao-internacional' }));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.4.1-fase-6.9.1-ajustes-cadastro' }));
 
 
 const SERVICOS_COM_AGENDA = SERVICOS_CONFIG.filter(s => s.ativo !== false && s.requerAgenda).map(s => s.codigo);
