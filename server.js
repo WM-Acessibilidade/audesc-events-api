@@ -35,6 +35,44 @@ const MERCADOPAGO_VALOR_EVENTO = Number(process.env.MERCADOPAGO_VALOR_EVENTO || 
 const MERCADOPAGO_NOTIFICATION_URL = process.env.MERCADOPAGO_NOTIFICATION_URL || 'https://audesc-events-api.onrender.com/webhooks/mercadopago';
 const AUDESC_WEB_URL = process.env.AUDESC_WEB_URL || 'https://wm-acessibilidade.github.io/audesc-web';
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
+
+const PAISES_COMERCIAIS = Object.freeze([
+  {codigo:'BR',nome:'Brasil',moeda:'BRL'},
+  {codigo:'AO',nome:'Angola',moeda:'AOA'},
+  {codigo:'CV',nome:'Cabo Verde',moeda:'CVE'},
+  {codigo:'GW',nome:'Guiné-Bissau',moeda:'XOF'},
+  {codigo:'GQ',nome:'Guiné Equatorial',moeda:'XAF'},
+  {codigo:'MZ',nome:'Moçambique',moeda:'MZN'},
+  {codigo:'PT',nome:'Portugal',moeda:'EUR'},
+  {codigo:'ST',nome:'São Tomé e Príncipe',moeda:'STN'},
+  {codigo:'TL',nome:'Timor-Leste',moeda:'USD'}
+]);
+const PAIS_COMERCIAL_POR_CODIGO = new Map(PAISES_COMERCIAIS.map(p=>[p.codigo,p]));
+const PAIS_COMERCIAL_POR_NOME = new Map(PAISES_COMERCIAIS.map(p=>[p.nome.toLowerCase(),p]));
+const MOEDAS_PADDLE_SUPORTADAS = new Set(['USD','EUR','GBP','AUD','CAD','ARS','BRL','CHF','CNY','COP','CZK','DKK','HKD','HUF','ILS','INR','JPY','KRW','MXN','NOK','NZD','PLN','RUB','SEK','SGD','THB','TRY','TWD','UAH','VND','ZAR']);
+function paisComercialEvento(ev){
+  const codigo=String(ev?.pais_codigo||'').trim().toUpperCase();
+  if(PAIS_COMERCIAL_POR_CODIGO.has(codigo)) return PAIS_COMERCIAL_POR_CODIGO.get(codigo);
+  const nome=String(paisPagamentoEvento(ev)||ev?.pais||'').trim().toLowerCase();
+  return PAIS_COMERCIAL_POR_NOME.get(nome)||null;
+}
+function codigoPaisComercial(ev){return paisComercialEvento(ev)?.codigo||String(ev?.pais_codigo||'').trim().toUpperCase()||null;}
+function plataformaDisponivelNoServidor(plataforma,paisCodigo,moeda){
+  if(plataforma==='mercadopago') return paisCodigo==='BR' && !!MERCADOPAGO_ACCESS_TOKEN && !!MERCADOPAGO_PUBLIC_KEY;
+  if(plataforma==='paddle') return !!PADDLE_API_KEY && !!PADDLE_CLIENT_TOKEN && MOEDAS_PADDLE_SUPORTADAS.has(String(moeda||'').toUpperCase());
+  return false;
+}
+async function obterConfiguracaoComercialPais(paisCodigo, fallbackEv=null){
+  const codigo=String(paisCodigo||codigoPaisComercial(fallbackEv)||'').toUpperCase();
+  const meta=PAIS_COMERCIAL_POR_CODIGO.get(codigo)||paisComercialEvento(fallbackEv)||{codigo,nome:fallbackEv?.pais||codigo,moeda:'USD'};
+  try{
+    const {data,error}=await getSupabase().from('configuracao_comercial_pais').select('*').eq('pais_codigo',codigo).maybeSingle();
+    if(error) throw error;
+    if(data) return Object.assign({},meta,data,{pais_codigo:codigo,moeda:String(data.moeda||meta.moeda||'USD').toUpperCase()});
+  }catch(e){console.warn('Configuração comercial por país indisponível:',e.message||e);}
+  const plataforma=codigo==='BR'?'mercadopago':'paddle';
+  return {pais_codigo:codigo,pais_nome:meta.nome,moeda:meta.moeda||'USD',plataforma_pagamento:plataforma,pagamentos_ativos:true};
+}
 function carregarServicosConfig(){
   const padrao = [
     {codigo:'audesc_transmissao',nome:'Transmissão Audesc (transmissor e receptores)',ativo:true,requerAgenda:false,usaTransmissao:true,somenteDivulgacao:false,somenteProfissional:false,permiteValorManual:false},
@@ -511,6 +549,8 @@ function paisPagamentoEvento(ev){
 }
 
 function moedaDoEvento(ev){
+  const meta=paisComercialEvento(ev);
+  if(meta?.moeda) return meta.moeda;
   const pais = paisPagamentoEvento(ev).toLowerCase();
   if(pais === 'brasil') return 'BRL';
   if(pais === 'portugal') return 'EUR';
@@ -572,34 +612,49 @@ function calcularValorPacote(ev, precificacao){
 
 
 function numeroSeguro(v, padrao=0){const n=Number(v);return Number.isFinite(n)?n:padrao;}
-async function obterPrecoServico(tipoServico, moeda){
+async function obterPrecoServico(tipoServico, moeda, paisCodigo){
  const servico=text(tipoServico)||'audesc_transmissao';
+ const codigo=String(paisCodigo||'').toUpperCase();
+ if(codigo){
+  try{
+   const {data,error}=await getSupabase().from('precificacao_pais_servicos').select('*').eq('pais_codigo',codigo).eq('tipo_servico',servico).maybeSingle();
+   if(error) throw error;
+   if(data) return data;
+  }catch(e){console.warn('Preço por país indisponível:',e.message||e);}
+ }
  try{
   const {data,error}=await getSupabase().from('precificacao_servicos').select('*').eq('tipo_servico',servico).eq('moeda',moeda).maybeSingle();
   if(error) throw error;
   return data||null;
  }catch(e){console.warn('Preço de serviço indisponível:',e.message||e);return null;}
 }
-async function calcularValorBaseServico(ev, moeda){
+function aplicarDescontoPromocional(valor,percentual){
+ const p=Math.max(0,Math.min(100,numeroSeguro(percentual,0)));
+ const desconto=arredondarValor(valor*(p/100));
+ return {percentual:p,desconto,valor_promocional:arredondarValor(valor-desconto)};
+}
+async function calcularValorBaseServico(ev, moeda, paisCodigo){
  const servicos=servicosDoEvento(ev);
  const duracao=Math.max(1,Number(ev.duracao_horas||1));
  const detalhes=[];
- let total=0;
- let ouvintes=null;
+ let valorTabela=0, descontoPromocional=0, total=0, ouvintes=null;
  for(const tipo of servicos){
+  const preco=await obterPrecoServico(tipo,moeda,paisCodigo);
   if(tipo==='audesc_transmissao'){
-   const p=await obterPrecificacao(moeda,'audesc_transmissao');
+   const p=preco||await obterPrecificacao(moeda,'audesc_transmissao');
    const pacote=calcularValorPacote(ev,p);
-   total+=numeroSeguro(pacote.valor_original,0); ouvintes=pacote.ouvintes;
-   detalhes.push({tipo_servico:tipo,descricao:nomeServico(tipo),valor:pacote.valor_original});
+   const promo=aplicarDescontoPromocional(pacote.valor_original,p?.desconto_percentual);
+   valorTabela+=pacote.valor_original; descontoPromocional+=promo.desconto; total+=promo.valor_promocional; ouvintes=pacote.ouvintes;
+   detalhes.push({tipo_servico:tipo,descricao:nomeServico(tipo),valor_tabela:pacote.valor_original,desconto_percentual:promo.percentual,desconto_promocional:promo.desconto,valor:promo.valor_promocional});
   }else{
-   const preco=await obterPrecoServico(tipo,moeda);
    const base=preco?numeroSeguro(preco.valor_hora,preco.valor_base_10_ouvintes_1_hora):0;
-   const valor=servicoRequerAgenda(tipo)?arredondarValor(base*duracao):arredondarValor(base);
-   total+=valor; detalhes.push({tipo_servico:tipo,descricao:nomeServico(tipo),valor,valor_unitario:base});
+   const bruto=servicoRequerAgenda(tipo)?arredondarValor(base*duracao):arredondarValor(base);
+   const promo=aplicarDescontoPromocional(bruto,preco?.desconto_percentual);
+   valorTabela+=bruto; descontoPromocional+=promo.desconto; total+=promo.valor_promocional;
+   detalhes.push({tipo_servico:tipo,descricao:nomeServico(tipo),valor_tabela:bruto,desconto_percentual:promo.percentual,desconto_promocional:promo.desconto,valor:promo.valor_promocional,valor_unitario:base});
   }
  }
- return {valor_original:arredondarValor(total),ouvintes,duracao_horas:duracao,servicos_solicitados:servicos,tipo_servico:tipoServicoLegado(servicos),detalhes:{itens:detalhes,descricao:detalhes.map(d=>d.descricao).join(' + ')}};
+ return {valor_tabela:arredondarValor(valorTabela),desconto_promocional:arredondarValor(descontoPromocional),valor_original:arredondarValor(total),ouvintes,duracao_horas:duracao,servicos_solicitados:servicos,tipo_servico:tipoServicoLegado(servicos),detalhes:{itens:detalhes,descricao:detalhes.map(d=>d.descricao).join(' + ')}};
 }
 
 
@@ -610,8 +665,9 @@ function valorNumericoOuNull(v){
 }
 
 async function calcularValorSugeridoAgenda(ev){
-  const moeda = moedaDoEvento(ev);
-  const pacote = await calcularValorBaseServico(ev, moeda);
+  const cfg=await obterConfiguracaoComercialPais(null,ev);
+  const moeda=cfg.moeda;
+  const pacote = await calcularValorBaseServico(ev, moeda, cfg.pais_codigo);
   if(!pacote) return { moeda, valor_sugerido_agenda: 0, pacote: null };
   return { moeda, valor_sugerido_agenda: arredondarValor(pacote.valor_original), pacote };
 }
@@ -633,53 +689,45 @@ function aplicarValorFinalAgendaSeExistir(ev, pacote){
 }
 
 async function calcularPagamentoEvento(ev, codigoCupom){
-  const moeda = moedaDoEvento(ev);
-  const servicoCalculado = await calcularValorBaseServico(ev, moeda);
-  let pacote = null;
-  if(servicoCalculado){
-    pacote = servicoCalculado;
-  }else{
-    const precificacao = await obterPrecificacao(moeda, ev.tipo_servico);
-    pacote = calcularValorPacote(ev, precificacao);
-  }
+  const configComercial=await obterConfiguracaoComercialPais(null,ev);
+  const moeda=configComercial.moeda;
+  const paisCodigo=configComercial.pais_codigo;
+  const servicoCalculado = await calcularValorBaseServico(ev, moeda, paisCodigo);
+  let pacote = servicoCalculado || calcularValorPacote(ev, await obterPrecificacao(moeda, ev.tipo_servico));
   pacote = aplicarValorFinalAgendaSeExistir(ev, pacote);
 
   let cupom = null;
-  let desconto = 0;
+  let descontoCupom = 0;
   const codigo = text(codigoCupom).toUpperCase();
-
   if(codigo){
-    const { data: cupomData, error: cupomError } = await getSupabase()
-      .from('cupons')
-      .select('*')
-      .eq('codigo', codigo)
-      .maybeSingle();
-
+    const { data: cupomData, error: cupomError } = await getSupabase().from('cupons').select('*').eq('codigo', codigo).maybeSingle();
     if(cupomError) throw cupomError;
     if(!cupomData) throw new Error('Cupom não encontrado.');
     if(!cupomData.ativo) throw new Error('Cupom inativo.');
     if(cupomData.validade && new Date(cupomData.validade).getTime() < Date.now()) throw new Error('Cupom expirado.');
     if(cupomData.limite_uso != null && Number(cupomData.usos_realizados || 0) >= Number(cupomData.limite_uso)) throw new Error('Cupom esgotado.');
-    if(cupomData.moeda && cupomData.moeda !== moeda) throw new Error('Este cupom não é válido para a moeda deste pagamento.');
-
-    if(cupomData.tipo_desconto === 'percentual'){
-      desconto = pacote.valor_original * (Number(cupomData.valor_desconto || 0) / 100);
-    }else{
-      desconto = Number(cupomData.valor_desconto || 0);
-    }
-
-    desconto = Math.min(pacote.valor_original, arredondarValor(desconto));
+    if(cupomData.pais_codigo && String(cupomData.pais_codigo).toUpperCase()!==paisCodigo) throw new Error('Este cupom não é válido para o país deste pagamento.');
+    if(!cupomData.pais_codigo && cupomData.moeda && cupomData.moeda !== moeda) throw new Error('Este cupom não é válido para a moeda deste pagamento.');
+    const aplicaveis=Array.isArray(cupomData.servicos_aplicaveis)?cupomData.servicos_aplicaveis:[];
+    if(aplicaveis.length && !servicosDoEvento(ev).some(s=>aplicaveis.includes(s))) throw new Error('Este cupom não é aplicável aos serviços selecionados.');
+    if(cupomData.tipo_desconto === 'percentual') descontoCupom = pacote.valor_original * (Number(cupomData.valor_desconto || 0) / 100);
+    else descontoCupom = Number(cupomData.valor_desconto || 0);
+    descontoCupom = Math.min(pacote.valor_original, arredondarValor(descontoCupom));
     cupom = cupomData;
   }
-
-  const valorFinal = arredondarValor(pacote.valor_original - desconto);
-
+  const valorFinal = arredondarValor(pacote.valor_original - descontoCupom);
   return {
+    pais_codigo:paisCodigo,
     moeda,
+    plataforma_pagamento:configComercial.plataforma_pagamento,
+    pagamentos_ativos:configComercial.pagamentos_ativos!==false,
+    plataforma_disponivel:plataformaDisponivelNoServidor(configComercial.plataforma_pagamento,paisCodigo,moeda),
     pacote,
     cupom,
     cupom_codigo: cupom ? cupom.codigo : null,
-    desconto_aplicado: desconto,
+    valor_tabela: pacote.valor_tabela ?? pacote.valor_original,
+    desconto_promocional: pacote.desconto_promocional || 0,
+    desconto_aplicado: descontoCupom,
     valor_original: pacote.valor_original,
     valor_final: valorFinal
   };
@@ -1412,7 +1460,7 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.1.0-fase-6.6-categorias' }));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.4.0-fase-6.9-precificacao-internacional' }));
 
 
 const SERVICOS_COM_AGENDA = SERVICOS_CONFIG.filter(s => s.ativo !== false && s.requerAgenda).map(s => s.codigo);
@@ -2063,107 +2111,85 @@ app.patch('/admin/formulario-config', async (req,res)=>{
   }
 });
 
-app.get('/admin/precificacao', async (req,res)=>{
+app.get('/admin/configuracao-comercial-paises', async (req,res)=>{
  try{
   if(!admin(req,res)) return;
-  const {data,error}=await getSupabase().from('precificacao').select('*').order('moeda',{ascending:true});
+  const {data,error}=await getSupabase().from('configuracao_comercial_pais').select('*').order('pais_nome',{ascending:true});
   if(error) throw error;
-  res.json({ok:true,precificacao:data||[]});
- }catch(e){
-  console.error(e);
-  res.status(500).json({error:e.message||'Erro ao carregar precificação.'});
- }
+  const porCodigo=new Map((data||[]).map(x=>[x.pais_codigo,x]));
+  const configuracoes=PAISES_COMERCIAIS.map(meta=>Object.assign({pais_codigo:meta.codigo,pais_nome:meta.nome,moeda:meta.moeda,plataforma_pagamento:meta.codigo==='BR'?'mercadopago':'paddle',pagamentos_ativos:true},porCodigo.get(meta.codigo)||{}, {integracao_disponivel:plataformaDisponivelNoServidor((porCodigo.get(meta.codigo)||{}).plataforma_pagamento|| (meta.codigo==='BR'?'mercadopago':'paddle'),meta.codigo,(porCodigo.get(meta.codigo)||{}).moeda||meta.moeda)}));
+  res.json({ok:true,configuracoes,moedas_paddle:[...MOEDAS_PADDLE_SUPORTADAS]});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao carregar configurações comerciais.'});}
 });
-
-app.patch('/admin/precificacao/:moeda', async (req,res)=>{
+app.patch('/admin/configuracao-comercial-paises/:paisCodigo', async (req,res)=>{
  try{
   if(!admin(req,res)) return;
-  const moeda = String(req.params.moeda || '').toUpperCase();
-  if(!['BRL','USD','EUR'].includes(moeda)) return res.status(400).json({error:'Moeda inválida.'});
-
+  const codigo=String(req.params.paisCodigo||'').toUpperCase();
+  const meta=PAIS_COMERCIAL_POR_CODIGO.get(codigo);
+  if(!meta) return res.status(400).json({error:'País inválido.'});
+  const moeda=String(req.body?.moeda||meta.moeda).toUpperCase();
+  const plataforma=text(req.body?.plataforma_pagamento);
+  if(!['mercadopago','paddle'].includes(plataforma)) return res.status(400).json({error:'Plataforma de pagamento inválida.'});
+  if(plataforma==='mercadopago' && codigo!=='BR') return res.status(400).json({error:'As credenciais atuais do Mercado Pago pertencem ao Brasil. Para outro país, será necessário cadastrar credenciais específicas daquele mercado.'});
+  if(plataforma==='paddle' && !MOEDAS_PADDLE_SUPORTADAS.has(moeda)) return res.status(400).json({error:'A moeda '+moeda+' não é aceita atualmente pelo Paddle. Escolha uma moeda compatível, como USD ou EUR.'});
+  const payload={pais_codigo:codigo,pais_nome:meta.nome,moeda,plataforma_pagamento:plataforma,pagamentos_ativos:req.body?.pagamentos_ativos!==false,atualizado_em:new Date().toISOString()};
+  const {data,error}=await getSupabase().from('configuracao_comercial_pais').upsert(payload,{onConflict:'pais_codigo'}).select().single();
+  if(error) throw error;
+  res.json({ok:true,configuracao:Object.assign({},data,{integracao_disponivel:plataformaDisponivelNoServidor(plataforma,codigo,moeda)})});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar configuração comercial.'});}
+});
+app.get('/admin/precificacao-pais/:paisCodigo', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
+  const codigo=String(req.params.paisCodigo||'').toUpperCase();
+  const cfg=await obterConfiguracaoComercialPais(codigo);
+  const {data,error}=await getSupabase().from('precificacao_pais_servicos').select('*').eq('pais_codigo',codigo);
+  if(error) throw error;
+  const existentes=new Map((data||[]).map(x=>[x.tipo_servico,x]));
+  const ativos=SERVICOS_CONFIG.filter(s=>s.ativo!==false && s.codigo!=='audesc_com_audiodescritor');
+  const faltantes=[];
+  for(const servico of ativos){
+   if(existentes.has(servico.codigo)) continue;
+   let legado=null;
+   try{const r=await getSupabase().from('precificacao_servicos').select('*').eq('tipo_servico',servico.codigo).eq('moeda',cfg.moeda).maybeSingle();legado=r.data||null;}catch(_e){}
+   faltantes.push({pais_codigo:codigo,tipo_servico:servico.codigo,moeda:cfg.moeda,valor_hora:Number(legado?.valor_hora||0),valor_base_10_ouvintes_1_hora:Number(legado?.valor_base_10_ouvintes_1_hora||0),acrescimo_por_10_ouvintes:Number(legado?.acrescimo_por_10_ouvintes||0),ouvintes_minimos:Number(legado?.ouvintes_minimos||10),duracao_minima_horas:Number(legado?.duracao_minima_horas||1),desconto_percentual:0,ativo:true,atualizado_em:new Date().toISOString()});
+  }
+  let todos=[...(data||[])];
+  if(faltantes.length){const ins=await getSupabase().from('precificacao_pais_servicos').insert(faltantes).select('*');if(ins.error)throw ins.error;todos.push(...(ins.data||[]));}
+  const ordem=new Map(SERVICOS_CONFIG.map(s=>[s.codigo,Number(s.ordem||999)]));
+  todos.sort((a,b)=>(ordem.get(a.tipo_servico)||999)-(ordem.get(b.tipo_servico)||999));
+  res.json({ok:true,configuracao:cfg,precificacao:todos});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao carregar precificação do país.'});}
+});
+app.patch('/admin/precificacao-pais/:id', async (req,res)=>{
+ try{
+  if(!admin(req,res)) return;
   const b=req.body||{};
-  const update={
-   valor_base_10_ouvintes_1_hora:Number(b.valor_base_10_ouvintes_1_hora),
-   acrescimo_por_10_ouvintes:Number(b.acrescimo_por_10_ouvintes),
-   ouvintes_minimos:Number(b.ouvintes_minimos||10),
-   duracao_minima_horas:Number(b.duracao_minima_horas||1),
-   atualizado_em:new Date().toISOString()
-  };
-
-  const {data,error}=await getSupabase().from('precificacao').update(update).eq('moeda',moeda).select().single();
+  const desconto=Math.max(0,Math.min(100,Number(b.desconto_percentual||0)));
+  const update={valor_base_10_ouvintes_1_hora:Number(b.valor_base_10_ouvintes_1_hora||0),acrescimo_por_10_ouvintes:Number(b.acrescimo_por_10_ouvintes||0),valor_hora:Number(b.valor_hora||0),ouvintes_minimos:Number(b.ouvintes_minimos||10),duracao_minima_horas:Number(b.duracao_minima_horas||1),desconto_percentual:desconto,ativo:b.ativo!==false,atualizado_em:new Date().toISOString()};
+  const {data,error}=await getSupabase().from('precificacao_pais_servicos').update(update).eq('id',req.params.id).select().single();
   if(error) throw error;
   res.json({ok:true,precificacao:data});
- }catch(e){
-  console.error(e);
-  res.status(500).json({error:e.message||'Erro ao atualizar precificação.'});
- }
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar precificação.'});}
 });
-
 app.get('/admin/cupons', async (req,res)=>{
- try{
-  if(!admin(req,res)) return;
-  const {data,error}=await getSupabase().from('cupons').select('*').order('criado_em',{ascending:false});
-  if(error) throw error;
-  res.json({ok:true,cupons:data||[]});
- }catch(e){
-  console.error(e);
-  res.status(500).json({error:e.message||'Erro ao carregar cupons.'});
- }
+ try{if(!admin(req,res))return;let q=getSupabase().from('cupons').select('*').order('criado_em',{ascending:false});if(req.query.pais_codigo)q=q.eq('pais_codigo',String(req.query.pais_codigo).toUpperCase());const {data,error}=await q;if(error)throw error;res.json({ok:true,cupons:data||[]});}
+ catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao carregar cupons.'});}
 });
-
 app.post('/admin/cupons', async (req,res)=>{
  try{
-  if(!admin(req,res)) return;
-  const b=req.body||{};
-  const codigo=text(b.codigo).toUpperCase();
-  if(!codigo) return res.status(400).json({error:'Informe o código do cupom.'});
-  const tipo=text(b.tipo_desconto);
-  if(!['percentual','valor_fixo'].includes(tipo)) return res.status(400).json({error:'Tipo de desconto inválido.'});
-
-  const payload={
-   codigo,
-   tipo_desconto:tipo,
-   valor_desconto:Number(b.valor_desconto||0),
-   moeda:text(b.moeda)||null,
-   ativo:b.ativo !== false,
-   validade:b.validade || null,
-   limite_uso:b.limite_uso === '' || b.limite_uso == null ? null : Number(b.limite_uso),
-   atualizado_em:new Date().toISOString()
-  };
-
-  const {data,error}=await getSupabase().from('cupons').insert(payload).select().single();
-  if(error) throw error;
-  res.json({ok:true,cupom:data});
- }catch(e){
-  console.error(e);
-  res.status(500).json({error:e.message||'Erro ao criar cupom.'});
- }
+  if(!admin(req,res))return;const b=req.body||{};const codigo=text(b.codigo).toUpperCase();if(!codigo)return res.status(400).json({error:'Informe o código do cupom.'});const tipo=text(b.tipo_desconto);if(!['percentual','valor_fixo'].includes(tipo))return res.status(400).json({error:'Tipo de desconto inválido.'});
+  const payload={codigo,tipo_desconto:tipo,valor_desconto:Number(b.valor_desconto||0),pais_codigo:text(b.pais_codigo).toUpperCase()||null,moeda:text(b.moeda).toUpperCase()||null,servicos_aplicaveis:Array.isArray(b.servicos_aplicaveis)?b.servicos_aplicaveis.filter(servicoAtivo):[],ativo:b.ativo!==false,validade:b.validade||null,limite_uso:b.limite_uso===''||b.limite_uso==null?null:Number(b.limite_uso),atualizado_em:new Date().toISOString()};
+  const {data,error}=await getSupabase().from('cupons').insert(payload).select().single();if(error)throw error;res.json({ok:true,cupom:data});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao criar cupom.'});}
 });
-
 app.patch('/admin/cupons/:id', async (req,res)=>{
- try{
-  if(!admin(req,res)) return;
-  const b=req.body||{};
-  const update={atualizado_em:new Date().toISOString()};
-
-  ['codigo','tipo_desconto','moeda'].forEach(k=>{
-   if(Object.prototype.hasOwnProperty.call(b,k)) update[k]=k==='codigo'?text(b[k]).toUpperCase():(text(b[k])||null);
-  });
-  ['valor_desconto','limite_uso'].forEach(k=>{
-   if(Object.prototype.hasOwnProperty.call(b,k)) update[k]=(b[k]===''||b[k]==null)?null:Number(b[k]);
-  });
-  ['ativo'].forEach(k=>{
-   if(Object.prototype.hasOwnProperty.call(b,k)) update[k]=!!b[k];
-  });
-  if(Object.prototype.hasOwnProperty.call(b,'validade')) update.validade=b.validade||null;
-
-  const {data,error}=await getSupabase().from('cupons').update(update).eq('id',req.params.id).select().single();
-  if(error) throw error;
-  res.json({ok:true,cupom:data});
- }catch(e){
-  console.error(e);
-  res.status(500).json({error:e.message||'Erro ao atualizar cupom.'});
- }
+ try{if(!admin(req,res))return;const b=req.body||{};const update={atualizado_em:new Date().toISOString()};['codigo','tipo_desconto','moeda','pais_codigo'].forEach(k=>{if(Object.prototype.hasOwnProperty.call(b,k))update[k]=k==='codigo'?text(b[k]).toUpperCase():(text(b[k]).toUpperCase()||null);});['valor_desconto','limite_uso'].forEach(k=>{if(Object.prototype.hasOwnProperty.call(b,k))update[k]=(b[k]===''||b[k]==null)?null:Number(b[k]);});if(Object.prototype.hasOwnProperty.call(b,'ativo'))update.ativo=!!b.ativo;if(Object.prototype.hasOwnProperty.call(b,'validade'))update.validade=b.validade||null;if(Object.prototype.hasOwnProperty.call(b,'servicos_aplicaveis'))update.servicos_aplicaveis=Array.isArray(b.servicos_aplicaveis)?b.servicos_aplicaveis.filter(servicoAtivo):[];const {data,error}=await getSupabase().from('cupons').update(update).eq('id',req.params.id).select().single();if(error)throw error;res.json({ok:true,cupom:data});}
+ catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao atualizar cupom.'});}
+});
+app.delete('/admin/cupons/:id', async (req,res)=>{
+ try{if(!admin(req,res))return;const {error}=await getSupabase().from('cupons').delete().eq('id',req.params.id);if(error)throw error;res.json({ok:true});}
+ catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao excluir cupom.'});}
 });
 
 app.get('/pagamentos/calcular/:id', async (req,res)=>{
@@ -3050,11 +3076,9 @@ app.post('/pagamentos/mercadopago/criar-preferencia', async (req,res)=>{
   if(ev.status_pagamento === 'pago') return res.json({ok:true,ja_pago:true,mensagem:'Evento já está pago.'});
   if(pagamentoBloqueadoPorAgenda(ev)) return res.status(409).json({error:mensagemAgenda(ev),status_agenda:statusAgendaEvento(ev)});
 
-  if(paisPagamentoEvento(ev).toLowerCase() !== 'brasil'){
-   return res.status(400).json({error:'Mercado Pago está disponível apenas para eventos do Brasil. Para outros países, use o pagamento internacional.'});
-  }
-
   const dadosPagamento = await calcularPagamentoEvento(ev, codigoCupom);
+  if(dadosPagamento.plataforma_pagamento !== 'mercadopago') return res.status(400).json({error:'Este país está configurado para pagamento por '+(dadosPagamento.plataforma_pagamento||'outra plataforma')+'.'});
+  if(!dadosPagamento.pagamentos_ativos || !dadosPagamento.plataforma_disponivel) return res.status(503).json({error:'A integração de pagamento configurada para este país não está disponível.'});
   if(dadosPagamento.valor_final <= 0){
    await registrarDadosPagamentoEvento(ev.id, dadosPagamento, 'mercadopago', 'cupom_integral');
    const { data: pagamentoConfirmado, error: updateError } = await getSupabase().from('eventos').update({
@@ -3174,10 +3198,8 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
   if(pagamentoBloqueadoPorAgenda(ev)) return res.status(409).json({error:mensagemAgenda(ev),status_agenda:statusAgendaEvento(ev)});
 
   const dadosPagamento = await calcularPagamentoEvento(ev, codigoCupom);
-  if(paisPagamentoEvento(ev).toLowerCase() === 'brasil'){
-   return res.status(400).json({error:'Paddle é usado apenas para pagamentos internacionais. Para Brasil, use Mercado Pago.'});
-  }
-  if(!['USD','EUR'].includes(dadosPagamento.moeda)) dadosPagamento.moeda = 'USD';
+  if(dadosPagamento.plataforma_pagamento !== 'paddle') return res.status(400).json({error:'Este país está configurado para pagamento por '+(dadosPagamento.plataforma_pagamento||'outra plataforma')+'.'});
+  if(!dadosPagamento.pagamentos_ativos || !dadosPagamento.plataforma_disponivel) return res.status(503).json({error:'A integração Paddle ou a moeda configurada não está disponível para este país.'});
 
   if(dadosPagamento.valor_final <= 0){
    await registrarDadosPagamentoEvento(ev.id, dadosPagamento, 'paddle', 'cupom_integral');
