@@ -1394,32 +1394,98 @@ async function previsoesAutocompleteGoogle(query, codigoPais){
   const j=await r.json().catch(()=>({}));
   return (Array.isArray(j.suggestions)?j.suggestions:[]).map(x=>x.placePrediction).filter(Boolean);
 }
+const CACHE_SUGESTOES_LOCAIS = new Map();
+const CACHE_SUGESTOES_TTL_MS = 6 * 60 * 60 * 1000;
+function chaveCacheSugestoes(query,ctx){
+  return [normalizarBuscaLocal(query),String(ctx.codigoPais||'').toUpperCase(),String(ctx.unidadeCodigo||'').toUpperCase()].join('|');
+}
+function lerCacheSugestoes(chave){
+  const item=CACHE_SUGESTOES_LOCAIS.get(chave);
+  if(!item) return null;
+  if(item.expiraEm<Date.now()){CACHE_SUGESTOES_LOCAIS.delete(chave);return null;}
+  return item.resultados;
+}
+function gravarCacheSugestoes(chave,resultados){
+  CACHE_SUGESTOES_LOCAIS.set(chave,{expiraEm:Date.now()+CACHE_SUGESTOES_TTL_MS,resultados});
+  if(CACHE_SUGESTOES_LOCAIS.size>500){
+    const primeira=CACHE_SUGESTOES_LOCAIS.keys().next().value;
+    CACHE_SUGESTOES_LOCAIS.delete(primeira);
+  }
+}
+function normalizarLocalConhecido(v){return normalizarBuscaLocal(v).replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();}
+function localConhecidoParaSugestao(item){
+  return {
+    id:'audesc-'+item.id,
+    local_id:item.id,
+    place_id:item.google_place_id||'',
+    nome:item.nome||'',
+    endereco:item.endereco||'',
+    texto_completo:[item.nome,item.endereco&&item.endereco!==item.nome?item.endereco:''].filter(Boolean).join(' — '),
+    lat:Number(item.latitude),lon:Number(item.longitude),provedor:'audesc',
+    pais_nome:item.pais_nome||'',pais_codigo:item.pais_codigo||'',
+    unidade_nome:item.unidade_nome||'',unidade_codigo:item.unidade_codigo||'',cidade:item.cidade||''
+  };
+}
+async function buscarLocaisConhecidos(query,ctx){
+  const termo=normalizarLocalConhecido(query);
+  if(!termo) return [];
+  let q=getSupabase().from('locais_conhecidos')
+    .select('id,google_place_id,nome,endereco,pais_nome,pais_codigo,unidade_nome,unidade_codigo,cidade,latitude,longitude,quantidade_usos,ultimo_uso_em')
+    .eq('ativo',true).ilike('texto_busca',`%${termo}%`).limit(30);
+  if(ctx.codigoPais) q=q.eq('pais_codigo',ctx.codigoPais);
+  const {data,error}=await q;
+  if(error){console.warn('Diretório interno de locais indisponível:',error.message||error);return [];}
+  const unidade=String(ctx.unidadeCodigo||'').toUpperCase();
+  return (data||[]).filter(x=>Number.isFinite(Number(x.latitude))&&Number.isFinite(Number(x.longitude)))
+    .sort((a,b)=>{
+      const au=unidade&&String(a.unidade_codigo||'').toUpperCase()===unidade?1:0;
+      const bu=unidade&&String(b.unidade_codigo||'').toUpperCase()===unidade?1:0;
+      return bu-au || Number(b.quantidade_usos||0)-Number(a.quantidade_usos||0) || String(b.ultimo_uso_em||'').localeCompare(String(a.ultimo_uso_em||''));
+    }).slice(0,5).map(localConhecidoParaSugestao);
+}
+async function registrarLocalConhecido(item){
+  const nome=limit(item?.nome,200), endereco=limit(item?.endereco,500);
+  const latitude=numeroCoordenada(item?.lat??item?.latitude), longitude=numeroCoordenada(item?.lon??item?.longitude);
+  if(!nome||latitude===null||longitude===null) return null;
+  const googlePlaceId=limit(item?.place_id||item?.google_place_id,255);
+  const textoBusca=normalizarLocalConhecido([nome,endereco,item?.cidade,item?.unidade_nome,item?.pais_nome].filter(Boolean).join(' '));
+  const payload={google_place_id:googlePlaceId||null,nome,endereco,texto_busca:textoBusca,
+    pais_nome:limit(item?.pais_nome,120),pais_codigo:limit(item?.pais_codigo,10).toUpperCase(),
+    unidade_nome:limit(item?.unidade_nome,120),unidade_codigo:limit(item?.unidade_codigo,30).toUpperCase(),cidade:limit(item?.cidade,120),
+    latitude,longitude,fonte:limit(item?.provedor||'usuario',40),ultimo_uso_em:new Date().toISOString(),ativo:true};
+  let existente=null;
+  if(googlePlaceId){
+    const r=await getSupabase().from('locais_conhecidos').select('id,quantidade_usos').eq('google_place_id',googlePlaceId).maybeSingle();
+    if(!r.error) existente=r.data;
+  }
+  if(!existente){
+    const r=await getSupabase().from('locais_conhecidos').select('id,quantidade_usos').eq('pais_codigo',payload.pais_codigo).eq('texto_busca',textoBusca).limit(1);
+    if(!r.error) existente=(r.data||[])[0]||null;
+  }
+  if(existente){
+    payload.quantidade_usos=Number(existente.quantidade_usos||0)+1;
+    const {data,error}=await getSupabase().from('locais_conhecidos').update(payload).eq('id',existente.id).select().single();
+    if(error) throw error; return data;
+  }
+  payload.quantidade_usos=1;
+  const {data,error}=await getSupabase().from('locais_conhecidos').insert(payload).select().single();
+  if(error) throw error; return data;
+}
 async function sugerirGooglePlaces(query, ctx){
   if(!GOOGLE_MAPS_API_KEY) return [];
-  // Primeiro prioriza o país escolhido. Depois completa, sem bloqueio geográfico.
-  const preferidas=ctx.codigoPais ? await previsoesAutocompleteGoogle(query,ctx.codigoPais) : [];
-  const globais=await previsoesAutocompleteGoogle(query,'');
-  const previsoes=[...preferidas,...globais];
-  const resultados=[], vistos=new Set();
+  // Uma única chamada de autocomplete. Os detalhes são buscados apenas após a seleção.
+  const previsoes=await previsoesAutocompleteGoogle(query,ctx.codigoPais||'');
+  const vistos=new Set(), resultados=[];
   for(const previsao of previsoes){
     const placeId=String(previsao.placeId||'').trim();
     if(!placeId||vistos.has(placeId)) continue;
     vistos.add(placeId);
-    const item=await detalhesGooglePlace(placeId);
-    if(!item) continue;
-    const loc=item.location||{}, lat=Number(loc.latitude), lon=Number(loc.longitude);
-    if(!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
-    const meta=metadadosGooglePlace(item);
-    const endereco=String(item.formattedAddress||previsao.text?.text||'').trim();
-    const nome=String(item.displayName?.text||previsao.structuredFormat?.mainText?.text||endereco||query).trim();
-    const texto_completo=[nome,endereco&&endereco!==nome?endereco:''].filter(Boolean).join(' — ');
-    const mesmaUnidade=!!ctx.unidadeCodigo && meta.unidade_codigo===String(ctx.unidadeCodigo).toUpperCase();
-    const mesmoPais=!!ctx.codigoPais && meta.pais_codigo===String(ctx.codigoPais).toUpperCase();
-    resultados.push({id:placeId,place_id:placeId,nome,endereco,texto_completo,lat,lon,provedor:'google_places_autocomplete',...meta,_prioridade:mesmaUnidade?0:(mesmoPais?1:2)});
-    if(resultados.length>=12) break;
+    const nome=String(previsao.structuredFormat?.mainText?.text||previsao.text?.text||query).trim();
+    const endereco=String(previsao.structuredFormat?.secondaryText?.text||'').trim();
+    resultados.push({id:placeId,place_id:placeId,nome,endereco,texto_completo:[nome,endereco].filter(Boolean).join(' — '),provedor:'google_places_autocomplete',precisa_detalhes:true});
+    if(resultados.length>=5) break;
   }
-  resultados.sort((a,b)=>a._prioridade-b._prioridade);
-  return resultados.slice(0,5).map(({_prioridade,...item})=>item);
+  return resultados;
 }
 
 async function sugerirNominatimLocais(query, ctx){
@@ -1474,15 +1540,51 @@ app.get('/geocode/sugestoes', async (req,res)=>{
     const codigoPais=(codigoPaisInformado || codigoPaisMaps(pais)).toUpperCase();
     const unidadeCodigo=(codigoUnidadeInformado || codigoUnidadeLocal(codigoPais,uf,ufTexto)).toUpperCase();
     const ctx={pais,uf,ufTexto,codigoPais,unidadeCodigo};
-    let resultados=[];
-    try{ resultados=await sugerirGooglePlaces(query,ctx); }
-    catch(erroGoogle){ console.warn('Falha no Google Places Autocomplete; usando Nominatim:',erroGoogle?.message||erroGoogle); }
-    if(!resultados.length) resultados=await sugerirNominatimLocais(query,ctx);
-    return res.json({ok:true,resultados});
+    const chave=chaveCacheSugestoes(query,ctx);
+    const emCache=lerCacheSugestoes(chave);
+    if(emCache) return res.json({ok:true,resultados:emCache,fonte:'cache'});
+    const internos=await buscarLocaisConhecidos(query,ctx);
+    let externos=[];
+    if(internos.length<5){
+      try{ externos=await sugerirGooglePlaces(query,ctx); }
+      catch(erroGoogle){ console.warn('Falha no Google Places Autocomplete:',erroGoogle?.message||erroGoogle); }
+      if(!externos.length && !internos.length) externos=await sugerirNominatimLocais(query,ctx);
+    }
+    const vistos=new Set(), resultados=[];
+    for(const item of [...internos,...externos]){
+      const chaveItem=String(item.place_id||item.local_id||item.texto_completo||item.id||'');
+      if(!chaveItem||vistos.has(chaveItem)) continue;
+      vistos.add(chaveItem);resultados.push(item);if(resultados.length>=5) break;
+    }
+    gravarCacheSugestoes(chave,resultados);
+    return res.json({ok:true,resultados,fonte:internos.length?'diretorio_e_externo':'externo'});
   }catch(e){
     console.error('Erro ao sugerir locais:',e);
     return res.status(500).json({error:'Erro ao buscar sugestões de locais.'});
   }
+});
+
+app.get('/geocode/detalhes', async (req,res)=>{
+  try{
+    const placeId=limit(req.query.place_id,255);
+    if(!placeId) return res.status(400).json({error:'Identificador do local não informado.'});
+    const item=await detalhesGooglePlace(placeId);
+    if(!item) return res.status(404).json({error:'Não foi possível obter os detalhes do local.'});
+    const loc=item.location||{}, lat=Number(loc.latitude), lon=Number(loc.longitude);
+    if(!Number.isFinite(lat)||!Number.isFinite(lon)) return res.status(404).json({error:'O local não possui coordenadas disponíveis.'});
+    const meta=metadadosGooglePlace(item);
+    const nome=String(item.displayName?.text||'').trim(), endereco=String(item.formattedAddress||'').trim();
+    return res.json({ok:true,resultado:{id:placeId,place_id:placeId,nome,endereco,texto_completo:[nome,endereco&&endereco!==nome?endereco:''].filter(Boolean).join(' — '),lat,lon,provedor:'google_places_details',...meta}});
+  }catch(e){console.error('Erro ao detalhar local:',e);return res.status(500).json({error:'Erro ao obter detalhes do local.'});}
+});
+app.post('/geocode/locais-conhecidos', async (req,res)=>{
+  try{
+    const user=await getUser(req);
+    if(!user) return res.status(401).json({error:'Autenticação necessária para registrar o local.'});
+    const data=await registrarLocalConhecido(req.body||{});
+    CACHE_SUGESTOES_LOCAIS.clear();
+    return res.json({ok:true,local:data});
+  }catch(e){console.error('Erro ao registrar local conhecido:',e);return res.status(500).json({error:'Não foi possível registrar o local selecionado.'});}
 });
 
 app.get('/geocode', async (req,res)=>{
@@ -1509,7 +1611,7 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.4.1-fase-6.9.1-ajustes-cadastro' }));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.4.2-fase-6.9.2-diretorio-locais' }));
 
 
 const SERVICOS_COM_AGENDA = SERVICOS_CONFIG.filter(s => s.ativo !== false && s.requerAgenda).map(s => s.codigo);
