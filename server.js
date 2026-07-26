@@ -1374,7 +1374,14 @@ async function detalhesGooglePlace(placeId){
   if(!r.ok) return null;
   return await r.json().catch(()=>null);
 }
+let GOOGLE_AUTOCOMPLETE_BLOQUEADO_ATE = 0;
+let GOOGLE_AUTOCOMPLETE_ULTIMO_ERRO = '';
+const GOOGLE_AUTOCOMPLETE_BLOQUEIO_429_MS = 60 * 60 * 1000;
+
 async function previsoesAutocompleteGoogle(query, codigoPais){
+  if(Date.now()<GOOGLE_AUTOCOMPLETE_BLOQUEADO_ATE){
+    return {resultados:[],indisponivel:true,motivo:'quota_google',status:429};
+  }
   const body={input:query,languageCode:'pt-BR'};
   if(codigoPais) body.includedRegionCodes=[String(codigoPais).toLowerCase()];
   const r=await fetch('https://places.googleapis.com/v1/places:autocomplete',{
@@ -1388,14 +1395,22 @@ async function previsoesAutocompleteGoogle(query, codigoPais){
   });
   if(!r.ok){
     const detalhe=await r.text().catch(()=>'');
+    GOOGLE_AUTOCOMPLETE_ULTIMO_ERRO=detalhe.slice(0,500);
     console.warn('Google Places Autocomplete recusou a consulta:',r.status,detalhe.slice(0,300));
-    return [];
+    if(r.status===429){
+      GOOGLE_AUTOCOMPLETE_BLOQUEADO_ATE=Date.now()+GOOGLE_AUTOCOMPLETE_BLOQUEIO_429_MS;
+      return {resultados:[],indisponivel:true,motivo:'quota_google',status:429};
+    }
+    return {resultados:[],indisponivel:true,motivo:'erro_google',status:r.status};
   }
+  GOOGLE_AUTOCOMPLETE_BLOQUEADO_ATE=0;
+  GOOGLE_AUTOCOMPLETE_ULTIMO_ERRO='';
   const j=await r.json().catch(()=>({}));
-  return (Array.isArray(j.suggestions)?j.suggestions:[]).map(x=>x.placePrediction).filter(Boolean);
+  return {resultados:(Array.isArray(j.suggestions)?j.suggestions:[]).map(x=>x.placePrediction).filter(Boolean),indisponivel:false,status:200};
 }
 const CACHE_SUGESTOES_LOCAIS = new Map();
 const CACHE_SUGESTOES_TTL_MS = 6 * 60 * 60 * 1000;
+const CACHE_SUGESTOES_VAZIO_TTL_MS = 30 * 1000;
 function chaveCacheSugestoes(query,ctx){
   return [normalizarBuscaLocal(query),String(ctx.codigoPais||'').toUpperCase(),String(ctx.unidadeCodigo||'').toUpperCase()].join('|');
 }
@@ -1405,8 +1420,8 @@ function lerCacheSugestoes(chave){
   if(item.expiraEm<Date.now()){CACHE_SUGESTOES_LOCAIS.delete(chave);return null;}
   return item.resultados;
 }
-function gravarCacheSugestoes(chave,resultados){
-  CACHE_SUGESTOES_LOCAIS.set(chave,{expiraEm:Date.now()+CACHE_SUGESTOES_TTL_MS,resultados});
+function gravarCacheSugestoes(chave,resultados,ttlMs=CACHE_SUGESTOES_TTL_MS){
+  CACHE_SUGESTOES_LOCAIS.set(chave,{expiraEm:Date.now()+ttlMs,resultados});
   if(CACHE_SUGESTOES_LOCAIS.size>500){
     const primeira=CACHE_SUGESTOES_LOCAIS.keys().next().value;
     CACHE_SUGESTOES_LOCAIS.delete(primeira);
@@ -1472,9 +1487,10 @@ async function registrarLocalConhecido(item){
   if(error) throw error; return data;
 }
 async function sugerirGooglePlaces(query, ctx){
-  if(!GOOGLE_MAPS_API_KEY) return [];
+  if(!GOOGLE_MAPS_API_KEY) return {resultados:[],indisponivel:true,motivo:'chave_google_ausente'};
   // Uma única chamada de autocomplete. Os detalhes são buscados apenas após a seleção.
-  const previsoes=await previsoesAutocompleteGoogle(query,ctx.codigoPais||'');
+  const resposta=await previsoesAutocompleteGoogle(query,ctx.codigoPais||'');
+  const previsoes=Array.isArray(resposta?.resultados)?resposta.resultados:[];
   const vistos=new Set(), resultados=[];
   for(const previsao of previsoes){
     const placeId=String(previsao.placeId||'').trim();
@@ -1485,47 +1501,50 @@ async function sugerirGooglePlaces(query, ctx){
     resultados.push({id:placeId,place_id:placeId,nome,endereco,texto_completo:[nome,endereco].filter(Boolean).join(' — '),provedor:'google_places_autocomplete',precisa_detalhes:true});
     if(resultados.length>=5) break;
   }
-  return resultados;
+  return {resultados,indisponivel:Boolean(resposta?.indisponivel),motivo:resposta?.motivo||'',status:resposta?.status||200};
+}
+
+let ULTIMA_CHAMADA_NOMINATIM_EM = 0;
+async function aguardarNominatim(){
+  const espera=Math.max(0,1000-(Date.now()-ULTIMA_CHAMADA_NOMINATIM_EM));
+  if(espera) await new Promise(resolve=>setTimeout(resolve,espera));
+  ULTIMA_CHAMADA_NOMINATIM_EM=Date.now();
 }
 
 async function sugerirNominatimLocais(query, ctx){
-  const resultados=[], vistos=new Set();
-  for(const consulta of montarVariantesConsultaLocal(query,ctx.pais,ctx.uf,ctx.ufTexto)){
-    let url='https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&accept-language=pt-BR&q='+encodeURIComponent(consulta);
-    if(ctx.codigoPais) url+='&countrycodes='+encodeURIComponent(ctx.codigoPais.toLowerCase());
-    const r=await fetch(url,{headers:{'User-Agent':'Audesc/1.0'}});
-    if(!r.ok) continue;
-    const lista=await r.json().catch(()=>[]);
-    for(const item of Array.isArray(lista)?lista:[]){
-      if(!resultadoNominatimDentro(item,ctx)) continue;
-      const lat=Number(item.lat), lon=Number(item.lon);
-      if(!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
-      const chave=String(item.place_id||item.osm_id||item.display_name||'');
-      if(!chave||vistos.has(chave)) continue;
-      vistos.add(chave);
-      const a=item.address||{};
-      const paisCodigo=String(a.country_code||ctx.codigoPais||'').toUpperCase();
-      const unidadeCodigo=String(a.state_code||(a['ISO3166-2-lvl4']||'').split('-').pop()||ctx.unidadeCodigo||'').toUpperCase();
-      const nome=String(item.name||item.display_name||consulta).trim();
-      const endereco=String(item.display_name||nome).trim();
-      resultados.push({
-        id:'nominatim-'+chave,
-        place_id:'',
-        nome,
-        endereco,
-        texto_completo:[nome,endereco&&endereco!==nome?endereco:''].filter(Boolean).join(' — '),
-        lat,lon,
-        provedor:'nominatim',
-        pais_nome:String(a.country||ctx.pais||'').trim(),
-        pais_codigo:paisCodigo,
-        unidade_nome:String(a.state||a.region||ctx.ufTexto||ctx.uf||'').trim(),
-        unidade_codigo:unidadeCodigo,
-        cidade:String(a.city||a.town||a.village||a.municipality||a.county||'').trim()
-      });
-      if(resultados.length>=5) return resultados;
-    }
+  const consulta=montarVariantesConsultaLocal(query,ctx.pais,ctx.uf,ctx.ufTexto)[0]||query;
+  let url='https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&accept-language=pt-BR&q='+encodeURIComponent(consulta);
+  if(ctx.codigoPais) url+='&countrycodes='+encodeURIComponent(ctx.codigoPais.toLowerCase());
+  await aguardarNominatim();
+  const r=await fetch(url,{headers:{'User-Agent':'Audesc/1.0 (contato: suporte@audesc.com)'}});
+  if(!r.ok){
+    console.warn('Nominatim recusou a consulta:',r.status);
+    return {resultados:[],indisponivel:true,status:r.status};
   }
-  return resultados;
+  const lista=await r.json().catch(()=>[]);
+  const resultados=[], vistos=new Set();
+  for(const item of Array.isArray(lista)?lista:[]){
+    if(!resultadoNominatimDentro(item,ctx)) continue;
+    const lat=Number(item.lat), lon=Number(item.lon);
+    if(!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
+    const chave=String(item.place_id||item.osm_id||item.display_name||'');
+    if(!chave||vistos.has(chave)) continue;
+    vistos.add(chave);
+    const a=item.address||{};
+    const paisCodigo=String(a.country_code||ctx.codigoPais||'').toUpperCase();
+    const unidadeCodigo=String(a.state_code||(a['ISO3166-2-lvl4']||'').split('-').pop()||ctx.unidadeCodigo||'').toUpperCase();
+    const nome=String(item.name||item.display_name||consulta).trim();
+    const endereco=String(item.display_name||nome).trim();
+    resultados.push({
+      id:'nominatim-'+chave,place_id:'',nome,endereco,
+      texto_completo:[nome,endereco&&endereco!==nome?endereco:''].filter(Boolean).join(' — '),
+      lat,lon,provedor:'nominatim',pais_nome:String(a.country||ctx.pais||'').trim(),pais_codigo:paisCodigo,
+      unidade_nome:String(a.state||a.region||ctx.ufTexto||ctx.uf||'').trim(),unidade_codigo:unidadeCodigo,
+      cidade:String(a.city||a.town||a.village||a.municipality||a.county||'').trim()
+    });
+    if(resultados.length>=5) break;
+  }
+  return {resultados,indisponivel:false,status:200};
 }
 
 app.get('/geocode/sugestoes', async (req,res)=>{
@@ -1545,10 +1564,24 @@ app.get('/geocode/sugestoes', async (req,res)=>{
     if(emCache) return res.json({ok:true,resultados:emCache,fonte:'cache'});
     const internos=await buscarLocaisConhecidos(query,ctx);
     let externos=[];
+    let googleIndisponivel=false;
+    let fallbackIndisponivel=false;
+    let motivo='';
     if(internos.length<5){
-      try{ externos=await sugerirGooglePlaces(query,ctx); }
-      catch(erroGoogle){ console.warn('Falha no Google Places Autocomplete:',erroGoogle?.message||erroGoogle); }
-      if(!externos.length && !internos.length) externos=await sugerirNominatimLocais(query,ctx);
+      try{
+        const respostaGoogle=await sugerirGooglePlaces(query,ctx);
+        externos=Array.isArray(respostaGoogle?.resultados)?respostaGoogle.resultados:[];
+        googleIndisponivel=Boolean(respostaGoogle?.indisponivel);
+        motivo=respostaGoogle?.motivo||'';
+      }catch(erroGoogle){
+        googleIndisponivel=true;motivo='erro_google';
+        console.warn('Falha no Google Places Autocomplete:',erroGoogle?.message||erroGoogle);
+      }
+      if(!externos.length && internos.length<5){
+        const respostaNominatim=await sugerirNominatimLocais(query,ctx).catch(e=>({resultados:[],indisponivel:true,erro:e}));
+        fallbackIndisponivel=Boolean(respostaNominatim?.indisponivel);
+        externos=Array.isArray(respostaNominatim?.resultados)?respostaNominatim.resultados:[];
+      }
     }
     const vistos=new Set(), resultados=[];
     for(const item of [...internos,...externos]){
@@ -1556,8 +1589,17 @@ app.get('/geocode/sugestoes', async (req,res)=>{
       if(!chaveItem||vistos.has(chaveItem)) continue;
       vistos.add(chaveItem);resultados.push(item);if(resultados.length>=5) break;
     }
-    gravarCacheSugestoes(chave,resultados);
-    return res.json({ok:true,resultados,fonte:internos.length?'diretorio_e_externo':'externo'});
+    // Resultados válidos podem ficar seis horas em cache. Falhas ou listas vazias ficam, no máximo, 30 segundos.
+    if(resultados.length) gravarCacheSugestoes(chave,resultados);
+    else if(!googleIndisponivel && !fallbackIndisponivel) gravarCacheSugestoes(chave,[],CACHE_SUGESTOES_VAZIO_TTL_MS);
+    const indisponivelTemporariamente=!resultados.length && googleIndisponivel && fallbackIndisponivel;
+    return res.json({
+      ok:true,resultados,
+      fonte:internos.length?'diretorio_e_externo':'externo',
+      indisponivel_temporariamente:indisponivelTemporariamente,
+      google_indisponivel:googleIndisponivel,
+      motivo:motivo||undefined
+    });
   }catch(e){
     console.error('Erro ao sugerir locais:',e);
     return res.status(500).json({error:'Erro ao buscar sugestões de locais.'});
