@@ -2360,7 +2360,7 @@ async function obterCatalogoPaises(){
 app.get('/paises-disponiveis', async (req,res)=>{
   try{
     const catalogo=await obterCatalogoPaises();
-    res.json({ok:true,paises:catalogo.filter(p=>p.habilitado!==false)});
+    res.json({ok:true,paises:catalogo.filter(p=>p.habilitado!==false).sort((a,b)=>String(a.nome||'').localeCompare(String(b.nome||''),'pt-BR',{sensitivity:'base'}))});
   }catch(e){res.status(500).json({error:e.message||'Erro ao carregar países disponíveis.'});}
 });
 
