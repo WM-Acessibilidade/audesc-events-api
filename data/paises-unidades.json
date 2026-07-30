@@ -53,7 +53,1815 @@
       "code": "TL",
       "unitLabel": "Município ou região administrativa especial",
       "timezoneDefault": "Asia/Dili"
+    },
+    {
+      "name": "Estados Unidos",
+      "code": "US",
+      "unitLabel": "Estado, distrito ou território",
+      "defaultUnit": "US-DC",
+      "units": [
+        {
+          "code": "US-AL",
+          "name": "Alabama"
+        },
+        {
+          "code": "US-AK",
+          "name": "Alaska"
+        },
+        {
+          "code": "US-AS",
+          "name": "American Samoa"
+        },
+        {
+          "code": "US-AZ",
+          "name": "Arizona"
+        },
+        {
+          "code": "US-AR",
+          "name": "Arkansas"
+        },
+        {
+          "code": "US-CA",
+          "name": "California"
+        },
+        {
+          "code": "US-CO",
+          "name": "Colorado"
+        },
+        {
+          "code": "US-CT",
+          "name": "Connecticut"
+        },
+        {
+          "code": "US-DE",
+          "name": "Delaware"
+        },
+        {
+          "code": "US-DC",
+          "name": "Distrito de Colúmbia"
+        },
+        {
+          "code": "US-FL",
+          "name": "Florida"
+        },
+        {
+          "code": "US-GA",
+          "name": "Georgia"
+        },
+        {
+          "code": "US-GU",
+          "name": "Guam"
+        },
+        {
+          "code": "US-HI",
+          "name": "Hawaii"
+        },
+        {
+          "code": "US-ID",
+          "name": "Idaho"
+        },
+        {
+          "code": "US-UM",
+          "name": "Ilhas Menores Distantes dos Estados Unidos"
+        },
+        {
+          "code": "US-IL",
+          "name": "Illinois"
+        },
+        {
+          "code": "US-IN",
+          "name": "Indiana"
+        },
+        {
+          "code": "US-IA",
+          "name": "Iowa"
+        },
+        {
+          "code": "US-KS",
+          "name": "Kansas"
+        },
+        {
+          "code": "US-KY",
+          "name": "Kentucky"
+        },
+        {
+          "code": "US-LA",
+          "name": "Louisiana"
+        },
+        {
+          "code": "US-ME",
+          "name": "Maine"
+        },
+        {
+          "code": "US-MD",
+          "name": "Maryland"
+        },
+        {
+          "code": "US-MA",
+          "name": "Massachusetts"
+        },
+        {
+          "code": "US-MI",
+          "name": "Michigan"
+        },
+        {
+          "code": "US-MN",
+          "name": "Minnesota"
+        },
+        {
+          "code": "US-MS",
+          "name": "Mississippi"
+        },
+        {
+          "code": "US-MO",
+          "name": "Missouri"
+        },
+        {
+          "code": "US-MT",
+          "name": "Montana"
+        },
+        {
+          "code": "US-NE",
+          "name": "Nebraska"
+        },
+        {
+          "code": "US-NV",
+          "name": "Nevada"
+        },
+        {
+          "code": "US-NH",
+          "name": "New Hampshire"
+        },
+        {
+          "code": "US-NJ",
+          "name": "New Jersey"
+        },
+        {
+          "code": "US-NM",
+          "name": "New Mexico"
+        },
+        {
+          "code": "US-NY",
+          "name": "New York"
+        },
+        {
+          "code": "US-NC",
+          "name": "North Carolina"
+        },
+        {
+          "code": "US-ND",
+          "name": "North Dakota"
+        },
+        {
+          "code": "US-MP",
+          "name": "Northern Mariana Islands"
+        },
+        {
+          "code": "US-OH",
+          "name": "Ohio"
+        },
+        {
+          "code": "US-OK",
+          "name": "Oklahoma"
+        },
+        {
+          "code": "US-OR",
+          "name": "Oregon"
+        },
+        {
+          "code": "US-PA",
+          "name": "Pennsylvania"
+        },
+        {
+          "code": "US-PR",
+          "name": "Puerto Rico"
+        },
+        {
+          "code": "US-RI",
+          "name": "Rhode Island"
+        },
+        {
+          "code": "US-SC",
+          "name": "South Carolina"
+        },
+        {
+          "code": "US-SD",
+          "name": "South Dakota"
+        },
+        {
+          "code": "US-TN",
+          "name": "Tennessee"
+        },
+        {
+          "code": "US-TX",
+          "name": "Texas"
+        },
+        {
+          "code": "US-UT",
+          "name": "Utah"
+        },
+        {
+          "code": "US-VT",
+          "name": "Vermont"
+        },
+        {
+          "code": "US-VI",
+          "name": "Virgin Islands, U.S."
+        },
+        {
+          "code": "US-VA",
+          "name": "Virginia"
+        },
+        {
+          "code": "US-WA",
+          "name": "Washington"
+        },
+        {
+          "code": "US-WV",
+          "name": "West Virginia"
+        },
+        {
+          "code": "US-WI",
+          "name": "Wisconsin"
+        },
+        {
+          "code": "US-WY",
+          "name": "Wyoming"
+        }
+      ]
+    },
+    {
+      "name": "Canadá",
+      "code": "CA",
+      "unitLabel": "Província ou território",
+      "defaultUnit": "CA-ON",
+      "units": [
+        {
+          "code": "CA-AB",
+          "name": "Alberta"
+        },
+        {
+          "code": "CA-BC",
+          "name": "British Columbia"
+        },
+        {
+          "code": "CA-PE",
+          "name": "Ilha do Príncipe Eduardo"
+        },
+        {
+          "code": "CA-MB",
+          "name": "Manitoba"
+        },
+        {
+          "code": "CA-NB",
+          "name": "New Brunswick"
+        },
+        {
+          "code": "CA-NS",
+          "name": "Nova Escócia"
+        },
+        {
+          "code": "CA-NU",
+          "name": "Nunavut"
+        },
+        {
+          "code": "CA-ON",
+          "name": "Ontario"
+        },
+        {
+          "code": "CA-QC",
+          "name": "Quebec"
+        },
+        {
+          "code": "CA-SK",
+          "name": "Saskatchewan"
+        },
+        {
+          "code": "CA-NL",
+          "name": "Terra Nova e Labrador"
+        },
+        {
+          "code": "CA-NT",
+          "name": "Territórios do Noroeste"
+        },
+        {
+          "code": "CA-YT",
+          "name": "Yukon"
+        }
+      ]
+    },
+    {
+      "name": "Espanha",
+      "code": "ES",
+      "unitLabel": "Comunidade ou cidade autônoma",
+      "defaultUnit": "ES-MD",
+      "units": [
+        {
+          "code": "ES-AN",
+          "name": "Andalucía"
+        },
+        {
+          "code": "ES-AR",
+          "name": "Aragón"
+        },
+        {
+          "code": "ES-AS",
+          "name": "Astúrias"
+        },
+        {
+          "code": "ES-CB",
+          "name": "Cantabria"
+        },
+        {
+          "code": "ES-CL",
+          "name": "Castela e Leão"
+        },
+        {
+          "code": "ES-CM",
+          "name": "Castela-Mancha"
+        },
+        {
+          "code": "ES-CT",
+          "name": "Catalunya"
+        },
+        {
+          "code": "ES-CE",
+          "name": "Ceuta"
+        },
+        {
+          "code": "ES-MD",
+          "name": "Comunidade de Madri"
+        },
+        {
+          "code": "ES-VC",
+          "name": "Comunidade Valenciana"
+        },
+        {
+          "code": "ES-EX",
+          "name": "Extremadura"
+        },
+        {
+          "code": "ES-GA",
+          "name": "Galicia"
+        },
+        {
+          "code": "ES-IB",
+          "name": "Ilhas Baleares"
+        },
+        {
+          "code": "ES-CN",
+          "name": "Ilhas Canárias"
+        },
+        {
+          "code": "ES-RI",
+          "name": "La Rioja"
+        },
+        {
+          "code": "ES-ML",
+          "name": "Melilla"
+        },
+        {
+          "code": "ES-NC",
+          "name": "Navarra"
+        },
+        {
+          "code": "ES-PV",
+          "name": "País Basco"
+        },
+        {
+          "code": "ES-MC",
+          "name": "Região de Múrcia"
+        }
+      ]
+    },
+    {
+      "name": "França",
+      "code": "FR",
+      "unitLabel": "Região ou coletividade ultramarina",
+      "defaultUnit": "FR-IDF",
+      "units": [
+        {
+          "code": "FR-HDF",
+          "name": "Altos da França"
+        },
+        {
+          "code": "FR-ARA",
+          "name": "Auvérnia-Ródano-Alpes"
+        },
+        {
+          "code": "FR-BFC",
+          "name": "Borgonha-Franco-Condado"
+        },
+        {
+          "code": "FR-BRE",
+          "name": "Bretanha"
+        },
+        {
+          "code": "FR-CVL",
+          "name": "Centro-Vale do Loire"
+        },
+        {
+          "code": "FR-20R",
+          "name": "Córsega"
+        },
+        {
+          "code": "FR-GES",
+          "name": "Grande Leste"
+        },
+        {
+          "code": "FR-971",
+          "name": "Guadeloupe"
+        },
+        {
+          "code": "FR-973",
+          "name": "Guyane (française)"
+        },
+        {
+          "code": "FR-IDF",
+          "name": "Ilha de França"
+        },
+        {
+          "code": "FR-974",
+          "name": "La Réunion"
+        },
+        {
+          "code": "FR-972",
+          "name": "Martinique"
+        },
+        {
+          "code": "FR-976",
+          "name": "Mayotte"
+        },
+        {
+          "code": "FR-69M",
+          "name": "Métropole de Lyon"
+        },
+        {
+          "code": "FR-NOR",
+          "name": "Normandia"
+        },
+        {
+          "code": "FR-NAQ",
+          "name": "Nova Aquitânia"
+        },
+        {
+          "code": "FR-OCC",
+          "name": "Occitânia"
+        },
+        {
+          "code": "FR-75C",
+          "name": "Paris"
+        },
+        {
+          "code": "FR-PDL",
+          "name": "País do Loire"
+        },
+        {
+          "code": "FR-PAC",
+          "name": "Provença-Alpes-Costa Azul"
+        }
+      ]
+    },
+    {
+      "name": "Alemanha",
+      "code": "DE",
+      "unitLabel": "Estado federado",
+      "defaultUnit": "DE-BE",
+      "units": [
+        {
+          "code": "DE-BW",
+          "name": "Baden-Württemberg"
+        },
+        {
+          "code": "DE-BY",
+          "name": "Bayern"
+        },
+        {
+          "code": "DE-BE",
+          "name": "Berlin"
+        },
+        {
+          "code": "DE-BB",
+          "name": "Brandenburg"
+        },
+        {
+          "code": "DE-HB",
+          "name": "Bremen"
+        },
+        {
+          "code": "DE-HH",
+          "name": "Hamburg"
+        },
+        {
+          "code": "DE-HE",
+          "name": "Hessen"
+        },
+        {
+          "code": "DE-MV",
+          "name": "Mecklenburg-Vorpommern"
+        },
+        {
+          "code": "DE-NI",
+          "name": "Niedersachsen"
+        },
+        {
+          "code": "DE-NW",
+          "name": "Nordrhein-Westfalen"
+        },
+        {
+          "code": "DE-RP",
+          "name": "Rheinland-Pfalz"
+        },
+        {
+          "code": "DE-SL",
+          "name": "Saarland"
+        },
+        {
+          "code": "DE-SN",
+          "name": "Sachsen"
+        },
+        {
+          "code": "DE-ST",
+          "name": "Sachsen-Anhalt"
+        },
+        {
+          "code": "DE-SH",
+          "name": "Schleswig-Holstein"
+        },
+        {
+          "code": "DE-TH",
+          "name": "Thüringen"
+        }
+      ]
+    },
+    {
+      "name": "Reino Unido",
+      "code": "GB",
+      "unitLabel": "País constituinte",
+      "defaultUnit": "GB-ENG",
+      "units": [
+        {
+          "code": "GB-SCT",
+          "name": "Escócia"
+        },
+        {
+          "code": "GB-ENG",
+          "name": "Inglaterra"
+        },
+        {
+          "code": "GB-NIR",
+          "name": "Irlanda do Norte"
+        },
+        {
+          "code": "GB-WLS",
+          "name": "País de Gales"
+        }
+      ]
+    },
+    {
+      "name": "Itália",
+      "code": "IT",
+      "unitLabel": "Região",
+      "defaultUnit": "IT-62",
+      "units": [
+        {
+          "code": "IT-65",
+          "name": "Abruzzo"
+        },
+        {
+          "code": "IT-75",
+          "name": "Apúlia"
+        },
+        {
+          "code": "IT-77",
+          "name": "Basilicata"
+        },
+        {
+          "code": "IT-78",
+          "name": "Calabria"
+        },
+        {
+          "code": "IT-72",
+          "name": "Campânia"
+        },
+        {
+          "code": "IT-45",
+          "name": "Emília-Romanha"
+        },
+        {
+          "code": "IT-36",
+          "name": "Friuli Venezia Giulia"
+        },
+        {
+          "code": "IT-42",
+          "name": "Liguria"
+        },
+        {
+          "code": "IT-25",
+          "name": "Lombardia"
+        },
+        {
+          "code": "IT-62",
+          "name": "Lácio"
+        },
+        {
+          "code": "IT-57",
+          "name": "Marche"
+        },
+        {
+          "code": "IT-67",
+          "name": "Molise"
+        },
+        {
+          "code": "IT-21",
+          "name": "Piemonte"
+        },
+        {
+          "code": "IT-88",
+          "name": "Sardenha"
+        },
+        {
+          "code": "IT-82",
+          "name": "Sicília"
+        },
+        {
+          "code": "IT-52",
+          "name": "Toscana"
+        },
+        {
+          "code": "IT-32",
+          "name": "Trentino-Alto Adige"
+        },
+        {
+          "code": "IT-55",
+          "name": "Umbria"
+        },
+        {
+          "code": "IT-23",
+          "name": "Val d'Aoste"
+        },
+        {
+          "code": "IT-34",
+          "name": "Vêneto"
+        }
+      ]
+    },
+    {
+      "name": "Países Baixos",
+      "code": "NL",
+      "unitLabel": "Província",
+      "defaultUnit": "NL-NH",
+      "units": [
+        {
+          "code": "NL-NB",
+          "name": "Brabante do Norte"
+        },
+        {
+          "code": "NL-DR",
+          "name": "Drenthe"
+        },
+        {
+          "code": "NL-FL",
+          "name": "Flevolândia"
+        },
+        {
+          "code": "NL-FR",
+          "name": "Frísia"
+        },
+        {
+          "code": "NL-GE",
+          "name": "Gelderlândia"
+        },
+        {
+          "code": "NL-GR",
+          "name": "Groningen"
+        },
+        {
+          "code": "NL-NH",
+          "name": "Holanda do Norte"
+        },
+        {
+          "code": "NL-ZH",
+          "name": "Holanda do Sul"
+        },
+        {
+          "code": "NL-LI",
+          "name": "Limburg"
+        },
+        {
+          "code": "NL-OV",
+          "name": "Overissel"
+        },
+        {
+          "code": "NL-UT",
+          "name": "Utreque"
+        },
+        {
+          "code": "NL-ZE",
+          "name": "Zelândia"
+        }
+      ]
+    },
+    {
+      "name": "Irlanda",
+      "code": "IE",
+      "unitLabel": "Condado",
+      "defaultUnit": "IE-D",
+      "units": [
+        {
+          "code": "IE-CW",
+          "name": "Carlow"
+        },
+        {
+          "code": "IE-CN",
+          "name": "Cavan"
+        },
+        {
+          "code": "IE-CE",
+          "name": "Clare"
+        },
+        {
+          "code": "IE-CO",
+          "name": "Cork"
+        },
+        {
+          "code": "IE-DL",
+          "name": "Donegal"
+        },
+        {
+          "code": "IE-D",
+          "name": "Dublin"
+        },
+        {
+          "code": "IE-G",
+          "name": "Galway"
+        },
+        {
+          "code": "IE-KY",
+          "name": "Kerry"
+        },
+        {
+          "code": "IE-KE",
+          "name": "Kildare"
+        },
+        {
+          "code": "IE-KK",
+          "name": "Kilkenny"
+        },
+        {
+          "code": "IE-LS",
+          "name": "Laois"
+        },
+        {
+          "code": "IE-LM",
+          "name": "Leitrim"
+        },
+        {
+          "code": "IE-LK",
+          "name": "Limerick"
+        },
+        {
+          "code": "IE-LD",
+          "name": "Longford"
+        },
+        {
+          "code": "IE-LH",
+          "name": "Louth"
+        },
+        {
+          "code": "IE-MO",
+          "name": "Mayo"
+        },
+        {
+          "code": "IE-MH",
+          "name": "Meath"
+        },
+        {
+          "code": "IE-MN",
+          "name": "Monaghan"
+        },
+        {
+          "code": "IE-OY",
+          "name": "Offaly"
+        },
+        {
+          "code": "IE-RN",
+          "name": "Roscommon"
+        },
+        {
+          "code": "IE-SO",
+          "name": "Sligo"
+        },
+        {
+          "code": "IE-TA",
+          "name": "Tipperary"
+        },
+        {
+          "code": "IE-WD",
+          "name": "Waterford"
+        },
+        {
+          "code": "IE-WH",
+          "name": "Westmeath"
+        },
+        {
+          "code": "IE-WX",
+          "name": "Wexford"
+        },
+        {
+          "code": "IE-WW",
+          "name": "Wicklow"
+        }
+      ]
+    },
+    {
+      "name": "Suíça",
+      "code": "CH",
+      "unitLabel": "Cantão",
+      "defaultUnit": "CH-ZH",
+      "units": [
+        {
+          "code": "CH-AG",
+          "name": "Aargau"
+        },
+        {
+          "code": "CH-AR",
+          "name": "Appenzell Ausserrhoden"
+        },
+        {
+          "code": "CH-AI",
+          "name": "Appenzell Innerrhoden"
+        },
+        {
+          "code": "CH-BL",
+          "name": "Basel-Landschaft"
+        },
+        {
+          "code": "CH-BS",
+          "name": "Basel-Stadt"
+        },
+        {
+          "code": "CH-BE",
+          "name": "Berne"
+        },
+        {
+          "code": "CH-FR",
+          "name": "Fribourg"
+        },
+        {
+          "code": "CH-GE",
+          "name": "Genève"
+        },
+        {
+          "code": "CH-GL",
+          "name": "Glarus"
+        },
+        {
+          "code": "CH-GR",
+          "name": "Graubünden"
+        },
+        {
+          "code": "CH-JU",
+          "name": "Jura"
+        },
+        {
+          "code": "CH-LU",
+          "name": "Luzern"
+        },
+        {
+          "code": "CH-NE",
+          "name": "Neuchâtel"
+        },
+        {
+          "code": "CH-NW",
+          "name": "Nidwalden"
+        },
+        {
+          "code": "CH-OW",
+          "name": "Obwalden"
+        },
+        {
+          "code": "CH-SG",
+          "name": "Sankt Gallen"
+        },
+        {
+          "code": "CH-SH",
+          "name": "Schaffhausen"
+        },
+        {
+          "code": "CH-SZ",
+          "name": "Schwyz"
+        },
+        {
+          "code": "CH-SO",
+          "name": "Solothurn"
+        },
+        {
+          "code": "CH-TG",
+          "name": "Thurgau"
+        },
+        {
+          "code": "CH-TI",
+          "name": "Ticino"
+        },
+        {
+          "code": "CH-UR",
+          "name": "Uri"
+        },
+        {
+          "code": "CH-VS",
+          "name": "Valais"
+        },
+        {
+          "code": "CH-VD",
+          "name": "Vaud"
+        },
+        {
+          "code": "CH-ZG",
+          "name": "Zug"
+        },
+        {
+          "code": "CH-ZH",
+          "name": "Zürich"
+        }
+      ]
+    },
+    {
+      "name": "Austrália",
+      "code": "AU",
+      "unitLabel": "Estado ou território",
+      "defaultUnit": "AU-NSW",
+      "units": [
+        {
+          "code": "AU-SA",
+          "name": "Austrália Meridional"
+        },
+        {
+          "code": "AU-WA",
+          "name": "Austrália Ocidental"
+        },
+        {
+          "code": "AU-NSW",
+          "name": "Nova Gales do Sul"
+        },
+        {
+          "code": "AU-QLD",
+          "name": "Queensland"
+        },
+        {
+          "code": "AU-TAS",
+          "name": "Tasmania"
+        },
+        {
+          "code": "AU-ACT",
+          "name": "Território da Capital Australiana"
+        },
+        {
+          "code": "AU-NT",
+          "name": "Território do Norte"
+        },
+        {
+          "code": "AU-VIC",
+          "name": "Victoria"
+        }
+      ]
+    },
+    {
+      "name": "Nova Zelândia",
+      "code": "NZ",
+      "unitLabel": "Região ou autoridade insular especial",
+      "defaultUnit": "NZ-AUK",
+      "units": [
+        {
+          "code": "NZ-AUK",
+          "name": "Auckland"
+        },
+        {
+          "code": "NZ-HKB",
+          "name": "Baía de Hawke"
+        },
+        {
+          "code": "NZ-BOP",
+          "name": "Baía de Plenty"
+        },
+        {
+          "code": "NZ-CAN",
+          "name": "Canterbury"
+        },
+        {
+          "code": "NZ-WTC",
+          "name": "Costa Oeste"
+        },
+        {
+          "code": "NZ-GIS",
+          "name": "Gisborne"
+        },
+        {
+          "code": "NZ-WGN",
+          "name": "Greater Wellington"
+        },
+        {
+          "code": "NZ-CIT",
+          "name": "Ilhas Chatham"
+        },
+        {
+          "code": "NZ-MWT",
+          "name": "Manawatū-Whanganui"
+        },
+        {
+          "code": "NZ-MBH",
+          "name": "Marlborough"
+        },
+        {
+          "code": "NZ-NSN",
+          "name": "Nelson"
+        },
+        {
+          "code": "NZ-NTL",
+          "name": "Northland"
+        },
+        {
+          "code": "NZ-OTA",
+          "name": "Otago"
+        },
+        {
+          "code": "NZ-STL",
+          "name": "Southland"
+        },
+        {
+          "code": "NZ-TKI",
+          "name": "Taranaki"
+        },
+        {
+          "code": "NZ-TAS",
+          "name": "Tasman"
+        },
+        {
+          "code": "NZ-WKO",
+          "name": "Waikato"
+        }
+      ]
+    },
+    {
+      "name": "México",
+      "code": "MX",
+      "unitLabel": "Estado ou entidade federativa",
+      "defaultUnit": "MX-CMX",
+      "units": [
+        {
+          "code": "MX-AGU",
+          "name": "Aguascalientes"
+        },
+        {
+          "code": "MX-BCN",
+          "name": "Baja California"
+        },
+        {
+          "code": "MX-BCS",
+          "name": "Baja California Sur"
+        },
+        {
+          "code": "MX-CAM",
+          "name": "Campeche"
+        },
+        {
+          "code": "MX-CHP",
+          "name": "Chiapas"
+        },
+        {
+          "code": "MX-CHH",
+          "name": "Chihuahua"
+        },
+        {
+          "code": "MX-CMX",
+          "name": "Cidade do México"
+        },
+        {
+          "code": "MX-COA",
+          "name": "Coahuila de Zaragoza"
+        },
+        {
+          "code": "MX-COL",
+          "name": "Colima"
+        },
+        {
+          "code": "MX-DUR",
+          "name": "Durango"
+        },
+        {
+          "code": "MX-GUA",
+          "name": "Guanajuato"
+        },
+        {
+          "code": "MX-GRO",
+          "name": "Guerrero"
+        },
+        {
+          "code": "MX-HID",
+          "name": "Hidalgo"
+        },
+        {
+          "code": "MX-JAL",
+          "name": "Jalisco"
+        },
+        {
+          "code": "MX-MIC",
+          "name": "Michoacán de Ocampo"
+        },
+        {
+          "code": "MX-MOR",
+          "name": "Morelos"
+        },
+        {
+          "code": "MX-MEX",
+          "name": "México"
+        },
+        {
+          "code": "MX-NAY",
+          "name": "Nayarit"
+        },
+        {
+          "code": "MX-NLE",
+          "name": "Nuevo León"
+        },
+        {
+          "code": "MX-OAX",
+          "name": "Oaxaca"
+        },
+        {
+          "code": "MX-PUE",
+          "name": "Puebla"
+        },
+        {
+          "code": "MX-QUE",
+          "name": "Querétaro"
+        },
+        {
+          "code": "MX-ROO",
+          "name": "Quintana Roo"
+        },
+        {
+          "code": "MX-SLP",
+          "name": "San Luis Potosí"
+        },
+        {
+          "code": "MX-SIN",
+          "name": "Sinaloa"
+        },
+        {
+          "code": "MX-SON",
+          "name": "Sonora"
+        },
+        {
+          "code": "MX-TAB",
+          "name": "Tabasco"
+        },
+        {
+          "code": "MX-TAM",
+          "name": "Tamaulipas"
+        },
+        {
+          "code": "MX-TLA",
+          "name": "Tlaxcala"
+        },
+        {
+          "code": "MX-VER",
+          "name": "Veracruz de Ignacio de la Llave"
+        },
+        {
+          "code": "MX-YUC",
+          "name": "Yucatán"
+        },
+        {
+          "code": "MX-ZAC",
+          "name": "Zacatecas"
+        }
+      ]
+    },
+    {
+      "name": "Argentina",
+      "code": "AR",
+      "unitLabel": "Província ou cidade autônoma",
+      "defaultUnit": "AR-C",
+      "units": [
+        {
+          "code": "AR-B",
+          "name": "Buenos Aires"
+        },
+        {
+          "code": "AR-K",
+          "name": "Catamarca"
+        },
+        {
+          "code": "AR-H",
+          "name": "Chaco"
+        },
+        {
+          "code": "AR-U",
+          "name": "Chubut"
+        },
+        {
+          "code": "AR-C",
+          "name": "Cidade Autônoma de Buenos Aires"
+        },
+        {
+          "code": "AR-W",
+          "name": "Corrientes"
+        },
+        {
+          "code": "AR-X",
+          "name": "Córdoba"
+        },
+        {
+          "code": "AR-E",
+          "name": "Entre Ríos"
+        },
+        {
+          "code": "AR-P",
+          "name": "Formosa"
+        },
+        {
+          "code": "AR-Y",
+          "name": "Jujuy"
+        },
+        {
+          "code": "AR-L",
+          "name": "La Pampa"
+        },
+        {
+          "code": "AR-F",
+          "name": "La Rioja"
+        },
+        {
+          "code": "AR-M",
+          "name": "Mendoza"
+        },
+        {
+          "code": "AR-N",
+          "name": "Misiones"
+        },
+        {
+          "code": "AR-Q",
+          "name": "Neuquén"
+        },
+        {
+          "code": "AR-R",
+          "name": "Río Negro"
+        },
+        {
+          "code": "AR-A",
+          "name": "Salta"
+        },
+        {
+          "code": "AR-J",
+          "name": "San Juan"
+        },
+        {
+          "code": "AR-D",
+          "name": "San Luis"
+        },
+        {
+          "code": "AR-Z",
+          "name": "Santa Cruz"
+        },
+        {
+          "code": "AR-S",
+          "name": "Santa Fé"
+        },
+        {
+          "code": "AR-G",
+          "name": "Santiago del Estero"
+        },
+        {
+          "code": "AR-V",
+          "name": "Tierra del Fuego"
+        },
+        {
+          "code": "AR-T",
+          "name": "Tucumán"
+        }
+      ]
+    },
+    {
+      "name": "Chile",
+      "code": "CL",
+      "unitLabel": "Região",
+      "defaultUnit": "CL-RM",
+      "units": [
+        {
+          "code": "CL-AI",
+          "name": "Aisén del General Carlos Ibañez del Campo"
+        },
+        {
+          "code": "CL-AN",
+          "name": "Antofagasta"
+        },
+        {
+          "code": "CL-AP",
+          "name": "Arica y Parinacota"
+        },
+        {
+          "code": "CL-AT",
+          "name": "Atacama"
+        },
+        {
+          "code": "CL-BI",
+          "name": "Biobío"
+        },
+        {
+          "code": "CL-CO",
+          "name": "Coquimbo"
+        },
+        {
+          "code": "CL-AR",
+          "name": "La Araucanía"
+        },
+        {
+          "code": "CL-LI",
+          "name": "Libertador General Bernardo O'Higgins"
+        },
+        {
+          "code": "CL-LL",
+          "name": "Los Lagos"
+        },
+        {
+          "code": "CL-LR",
+          "name": "Los Ríos"
+        },
+        {
+          "code": "CL-MA",
+          "name": "Magallanes"
+        },
+        {
+          "code": "CL-ML",
+          "name": "Maule"
+        },
+        {
+          "code": "CL-RM",
+          "name": "Região Metropolitana de Santiago"
+        },
+        {
+          "code": "CL-TA",
+          "name": "Tarapacá"
+        },
+        {
+          "code": "CL-VS",
+          "name": "Valparaíso"
+        },
+        {
+          "code": "CL-NB",
+          "name": "Ñuble"
+        }
+      ]
+    },
+    {
+      "name": "Colômbia",
+      "code": "CO",
+      "unitLabel": "Departamento ou distrito capital",
+      "defaultUnit": "CO-DC",
+      "units": [
+        {
+          "code": "CO-AMA",
+          "name": "Amazonas"
+        },
+        {
+          "code": "CO-ANT",
+          "name": "Antioquia"
+        },
+        {
+          "code": "CO-ARA",
+          "name": "Arauca"
+        },
+        {
+          "code": "CO-ATL",
+          "name": "Atlántico"
+        },
+        {
+          "code": "CO-BOL",
+          "name": "Bolívar"
+        },
+        {
+          "code": "CO-BOY",
+          "name": "Boyacá"
+        },
+        {
+          "code": "CO-CAL",
+          "name": "Caldas"
+        },
+        {
+          "code": "CO-CAQ",
+          "name": "Caquetá"
+        },
+        {
+          "code": "CO-CAS",
+          "name": "Casanare"
+        },
+        {
+          "code": "CO-CAU",
+          "name": "Cauca"
+        },
+        {
+          "code": "CO-CES",
+          "name": "Cesar"
+        },
+        {
+          "code": "CO-CHO",
+          "name": "Chocó"
+        },
+        {
+          "code": "CO-CUN",
+          "name": "Cundinamarca"
+        },
+        {
+          "code": "CO-COR",
+          "name": "Córdoba"
+        },
+        {
+          "code": "CO-DC",
+          "name": "Distrito Capital de Bogotá"
+        },
+        {
+          "code": "CO-GUA",
+          "name": "Guainía"
+        },
+        {
+          "code": "CO-GUV",
+          "name": "Guaviare"
+        },
+        {
+          "code": "CO-HUI",
+          "name": "Huila"
+        },
+        {
+          "code": "CO-LAG",
+          "name": "La Guajira"
+        },
+        {
+          "code": "CO-MAG",
+          "name": "Magdalena"
+        },
+        {
+          "code": "CO-MET",
+          "name": "Meta"
+        },
+        {
+          "code": "CO-NAR",
+          "name": "Nariño"
+        },
+        {
+          "code": "CO-NSA",
+          "name": "Norte de Santander"
+        },
+        {
+          "code": "CO-PUT",
+          "name": "Putumayo"
+        },
+        {
+          "code": "CO-QUI",
+          "name": "Quindío"
+        },
+        {
+          "code": "CO-RIS",
+          "name": "Risaralda"
+        },
+        {
+          "code": "CO-SAP",
+          "name": "San Andrés, Providencia y Santa Catalina"
+        },
+        {
+          "code": "CO-SAN",
+          "name": "Santander"
+        },
+        {
+          "code": "CO-SUC",
+          "name": "Sucre"
+        },
+        {
+          "code": "CO-TOL",
+          "name": "Tolima"
+        },
+        {
+          "code": "CO-VAC",
+          "name": "Valle del Cauca"
+        },
+        {
+          "code": "CO-VAU",
+          "name": "Vaupés"
+        },
+        {
+          "code": "CO-VID",
+          "name": "Vichada"
+        }
+      ]
+    },
+    {
+      "name": "Japão",
+      "code": "JP",
+      "unitLabel": "Prefeitura",
+      "defaultUnit": "JP-13",
+      "units": [
+        {
+          "code": "JP-23",
+          "name": "Aichi"
+        },
+        {
+          "code": "JP-05",
+          "name": "Akita"
+        },
+        {
+          "code": "JP-02",
+          "name": "Aomori"
+        },
+        {
+          "code": "JP-12",
+          "name": "Chiba"
+        },
+        {
+          "code": "JP-38",
+          "name": "Ehime"
+        },
+        {
+          "code": "JP-18",
+          "name": "Fukui"
+        },
+        {
+          "code": "JP-40",
+          "name": "Fukuoka"
+        },
+        {
+          "code": "JP-07",
+          "name": "Fukushima"
+        },
+        {
+          "code": "JP-21",
+          "name": "Gifu"
+        },
+        {
+          "code": "JP-10",
+          "name": "Gunma"
+        },
+        {
+          "code": "JP-34",
+          "name": "Hiroshima"
+        },
+        {
+          "code": "JP-01",
+          "name": "Hokkaido"
+        },
+        {
+          "code": "JP-28",
+          "name": "Hyogo"
+        },
+        {
+          "code": "JP-08",
+          "name": "Ibaraki"
+        },
+        {
+          "code": "JP-17",
+          "name": "Ishikawa"
+        },
+        {
+          "code": "JP-03",
+          "name": "Iwate"
+        },
+        {
+          "code": "JP-37",
+          "name": "Kagawa"
+        },
+        {
+          "code": "JP-46",
+          "name": "Kagoshima"
+        },
+        {
+          "code": "JP-14",
+          "name": "Kanagawa"
+        },
+        {
+          "code": "JP-39",
+          "name": "Kochi"
+        },
+        {
+          "code": "JP-43",
+          "name": "Kumamoto"
+        },
+        {
+          "code": "JP-24",
+          "name": "Mie"
+        },
+        {
+          "code": "JP-04",
+          "name": "Miyagi"
+        },
+        {
+          "code": "JP-45",
+          "name": "Miyazaki"
+        },
+        {
+          "code": "JP-20",
+          "name": "Nagano"
+        },
+        {
+          "code": "JP-42",
+          "name": "Nagasaki"
+        },
+        {
+          "code": "JP-29",
+          "name": "Nara"
+        },
+        {
+          "code": "JP-15",
+          "name": "Niigata"
+        },
+        {
+          "code": "JP-44",
+          "name": "Oita"
+        },
+        {
+          "code": "JP-33",
+          "name": "Okayama"
+        },
+        {
+          "code": "JP-47",
+          "name": "Okinawa"
+        },
+        {
+          "code": "JP-27",
+          "name": "Osaka"
+        },
+        {
+          "code": "JP-26",
+          "name": "Quioto"
+        },
+        {
+          "code": "JP-41",
+          "name": "Saga"
+        },
+        {
+          "code": "JP-11",
+          "name": "Saitama"
+        },
+        {
+          "code": "JP-25",
+          "name": "Shiga"
+        },
+        {
+          "code": "JP-32",
+          "name": "Shimane"
+        },
+        {
+          "code": "JP-22",
+          "name": "Shizuoka"
+        },
+        {
+          "code": "JP-09",
+          "name": "Tochigi"
+        },
+        {
+          "code": "JP-36",
+          "name": "Tokushima"
+        },
+        {
+          "code": "JP-31",
+          "name": "Tottori"
+        },
+        {
+          "code": "JP-16",
+          "name": "Toyama"
+        },
+        {
+          "code": "JP-13",
+          "name": "Tóquio"
+        },
+        {
+          "code": "JP-30",
+          "name": "Wakayama"
+        },
+        {
+          "code": "JP-06",
+          "name": "Yamagata"
+        },
+        {
+          "code": "JP-35",
+          "name": "Yamaguchi"
+        },
+        {
+          "code": "JP-19",
+          "name": "Yamanashi"
+        }
+      ]
+    },
+    {
+      "name": "Coreia do Sul",
+      "code": "KR",
+      "unitLabel": "Província ou cidade especial/metropolitana",
+      "defaultUnit": "KR-11",
+      "units": [
+        {
+          "code": "KR-26",
+          "name": "Busan"
+        },
+        {
+          "code": "KR-43",
+          "name": "Chungcheongbuk-do"
+        },
+        {
+          "code": "KR-44",
+          "name": "Chungcheongnam-do"
+        },
+        {
+          "code": "KR-27",
+          "name": "Daegu"
+        },
+        {
+          "code": "KR-30",
+          "name": "Daejeon"
+        },
+        {
+          "code": "KR-42",
+          "name": "Gangwon-teukbyeoljachido"
+        },
+        {
+          "code": "KR-29",
+          "name": "Gwangju"
+        },
+        {
+          "code": "KR-41",
+          "name": "Gyeonggi-do"
+        },
+        {
+          "code": "KR-47",
+          "name": "Gyeongsangbuk-do"
+        },
+        {
+          "code": "KR-48",
+          "name": "Gyeongsangnam-do"
+        },
+        {
+          "code": "KR-28",
+          "name": "Incheon"
+        },
+        {
+          "code": "KR-49",
+          "name": "Jeju-teukbyeoljachido"
+        },
+        {
+          "code": "KR-45",
+          "name": "Jeollabuk-do"
+        },
+        {
+          "code": "KR-46",
+          "name": "Jeollanam-do"
+        },
+        {
+          "code": "KR-50",
+          "name": "Sejong"
+        },
+        {
+          "code": "KR-11",
+          "name": "Seul"
+        },
+        {
+          "code": "KR-31",
+          "name": "Ulsan"
+        }
+      ]
+    },
+    {
+      "name": "Emirados Árabes Unidos",
+      "code": "AE",
+      "unitLabel": "Emirado",
+      "defaultUnit": "AE-DU",
+      "units": [
+        {
+          "code": "AE-AZ",
+          "name": "Abu Dhabi"
+        },
+        {
+          "code": "AE-AJ",
+          "name": "Ajman"
+        },
+        {
+          "code": "AE-DU",
+          "name": "Dubai"
+        },
+        {
+          "code": "AE-FU",
+          "name": "Fujairah"
+        },
+        {
+          "code": "AE-RK",
+          "name": "Ras al-Khaimah"
+        },
+        {
+          "code": "AE-SH",
+          "name": "Sharjah"
+        },
+        {
+          "code": "AE-UQ",
+          "name": "Umm al-Quwain"
+        }
+      ]
     }
   ],
-  "note": "Arquivo de referência para expansão internacional. O backend calcula timezone por país/unidade e armazena o campo timezone nos eventos."
+  "note": "Catálogo central de países e unidades administrativas da Fase 6.11.2. Os novos mercados herdam os serviços padrão do formulário e podem receber regras locais específicas."
 }
