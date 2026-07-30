@@ -87,7 +87,15 @@ const PAISES_COMERCIAIS = Object.freeze([
 ]);
 const PAIS_COMERCIAL_POR_CODIGO = new Map(PAISES_COMERCIAIS.map(p=>[p.codigo,p]));
 const PAIS_COMERCIAL_POR_NOME = new Map(PAISES_COMERCIAIS.map(p=>[p.nome.toLowerCase(),p]));
-const MOEDAS_PADDLE_SUPORTADAS = new Set(['USD','EUR','GBP','AUD','CAD','ARS','BRL','CHF','CNY','COP','CZK','DKK','HKD','HUF','ILS','INR','JPY','KRW','MXN','NOK','NZD','PLN','RUB','SEK','SGD','THB','TRY','TWD','UAH','VND','ZAR']);
+const MOEDAS_PADDLE_SUPORTADAS = new Set(['USD','EUR','GBP','JPY','AUD','CAD','CHF','HKD','SGD','SEK','ARS','BRL','CLP','CNY','COP','CZK','DKK','HUF','ILS','INR','KRW','MXN','NOK','NZD','PEN','PLN','RUB','THB','TRY','TWD','UAH','VND','ZAR']);
+function recomendacaoComercialPais(metaOuCodigo){
+  const meta=typeof metaOuCodigo==='string'?PAIS_COMERCIAL_POR_CODIGO.get(String(metaOuCodigo).toUpperCase()):metaOuCodigo;
+  const codigo=String(meta?.codigo||'').toUpperCase();
+  const moedaOrigem=String(meta?.moeda||'USD').toUpperCase();
+  if(codigo==='BR') return {moeda_origem:moedaOrigem,moeda_recomendada:'BRL',plataforma_recomendada:'mercadopago',fallback_usd:false};
+  if(MOEDAS_PADDLE_SUPORTADAS.has(moedaOrigem)) return {moeda_origem:moedaOrigem,moeda_recomendada:moedaOrigem,plataforma_recomendada:'paddle',fallback_usd:false};
+  return {moeda_origem:moedaOrigem,moeda_recomendada:'USD',plataforma_recomendada:'paddle',fallback_usd:true};
+}
 function paisComercialEvento(ev){
   const codigo=String(ev?.pais_codigo||'').trim().toUpperCase();
   if(PAIS_COMERCIAL_POR_CODIGO.has(codigo)) return PAIS_COMERCIAL_POR_CODIGO.get(codigo);
@@ -108,8 +116,8 @@ async function obterConfiguracaoComercialPais(paisCodigo, fallbackEv=null){
     if(error) throw error;
     if(data) return Object.assign({},meta,data,{pais_codigo:codigo,moeda:String(data.moeda||meta.moeda||'USD').toUpperCase()});
   }catch(e){console.warn('Configuração comercial por país indisponível:',e.message||e);}
-  const plataforma=codigo==='BR'?'mercadopago':'paddle';
-  return {pais_codigo:codigo,pais_nome:meta.nome,moeda:meta.moeda||'USD',plataforma_pagamento:plataforma,pagamentos_ativos:true};
+  const recomendada=recomendacaoComercialPais(meta);
+  return {pais_codigo:codigo,pais_nome:meta.nome,moeda:recomendada.moeda_recomendada,plataforma_pagamento:recomendada.plataforma_recomendada,pagamentos_ativos:true,...recomendada};
 }
 function carregarServicosConfig(){
   const padrao = [
@@ -1598,7 +1606,7 @@ app.get('/localizacao-aproximada', async (req,res)=>{
   const timer=setTimeout(()=>controller.abort(),4500);
   try{
     const url='https://ipapi.co/'+encodeURIComponent(ip)+'/json/';
-    const resposta=await fetch(url,{headers:{Accept:'application/json','User-Agent':'Audesc/21.5.0'},signal:controller.signal});
+    const resposta=await fetch(url,{headers:{Accept:'application/json','User-Agent':'Audesc/21.7.0'},signal:controller.signal});
     const dados=await resposta.json().catch(()=>({}));
     if(!resposta.ok || dados.error) throw new Error(dados.reason||dados.message||('HTTP '+resposta.status));
     const paisCodigo=String(dados.country_code||'').toUpperCase();
@@ -1725,7 +1733,7 @@ app.get('/geocode', async (req,res)=>{
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.4.2-fase-6.9.2-diretorio-locais' }));
+app.get('/health',(req,res)=>res.json({ok:true,service:'audesc-events-api',version:'21.7.0-fase-6.12-moeda-plataforma-automaticas' }));
 
 
 const SERVICOS_COM_AGENDA = SERVICOS_CONFIG.filter(s => s.ativo !== false && s.requerAgenda).map(s => s.codigo);
@@ -2427,8 +2435,14 @@ app.get('/admin/configuracao-comercial-paises', async (req,res)=>{
   const {data,error}=await getSupabase().from('configuracao_comercial_pais').select('*').order('pais_nome',{ascending:true});
   if(error) throw error;
   const porCodigo=new Map((data||[]).map(x=>[x.pais_codigo,x]));
-  const configuracoes=PAISES_COMERCIAIS.map(meta=>Object.assign({pais_codigo:meta.codigo,pais_nome:meta.nome,moeda:meta.moeda,plataforma_pagamento:meta.codigo==='BR'?'mercadopago':'paddle',pagamentos_ativos:true},porCodigo.get(meta.codigo)||{}, {integracao_disponivel:plataformaDisponivelNoServidor((porCodigo.get(meta.codigo)||{}).plataforma_pagamento|| (meta.codigo==='BR'?'mercadopago':'paddle'),meta.codigo,(porCodigo.get(meta.codigo)||{}).moeda||meta.moeda)}));
-  res.json({ok:true,configuracoes,moedas_paddle:[...MOEDAS_PADDLE_SUPORTADAS]});
+  const configuracoes=PAISES_COMERCIAIS.map(meta=>{
+    const recomendada=recomendacaoComercialPais(meta);
+    const salva=porCodigo.get(meta.codigo)||{};
+    const moeda=String(salva.moeda||recomendada.moeda_recomendada).toUpperCase();
+    const plataforma=salva.plataforma_pagamento||recomendada.plataforma_recomendada;
+    return Object.assign({pais_codigo:meta.codigo,pais_nome:meta.nome,moeda,plataforma_pagamento:plataforma,pagamentos_ativos:true},salva,recomendada,{integracao_disponivel:plataformaDisponivelNoServidor(plataforma,meta.codigo,moeda)});
+  }).sort((a,b)=>String(a.pais_nome).localeCompare(String(b.pais_nome),'pt-BR',{sensitivity:'base'}));
+  res.json({ok:true,configuracoes,moedas_paddle:[...MOEDAS_PADDLE_SUPORTADAS],regra_gateway:'BR usa Mercado Pago; demais países usam Paddle; moedas locais não aceitas usam USD.'});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao carregar configurações comerciais.'});}
 });
 app.patch('/admin/configuracao-comercial-paises/:paisCodigo', async (req,res)=>{
@@ -2441,11 +2455,16 @@ app.patch('/admin/configuracao-comercial-paises/:paisCodigo', async (req,res)=>{
   const plataforma=text(req.body?.plataforma_pagamento);
   if(!['mercadopago','paddle'].includes(plataforma)) return res.status(400).json({error:'Plataforma de pagamento inválida.'});
   if(plataforma==='mercadopago' && codigo!=='BR') return res.status(400).json({error:'As credenciais atuais do Mercado Pago pertencem ao Brasil. Para outro país, será necessário cadastrar credenciais específicas daquele mercado.'});
-  if(plataforma==='paddle' && !MOEDAS_PADDLE_SUPORTADAS.has(moeda)) return res.status(400).json({error:'A moeda '+moeda+' não é aceita atualmente pelo Paddle. Escolha uma moeda compatível, como USD ou EUR.'});
+  if(plataforma==='mercadopago' && moeda!=='BRL') return res.status(400).json({error:'A integração atual do Mercado Pago está configurada para BRL.'});
+  if(plataforma==='paddle' && !MOEDAS_PADDLE_SUPORTADAS.has(moeda)) return res.status(400).json({error:'A moeda '+moeda+' não é aceita atualmente pelo Paddle. Para este país, use USD.'});
   const payload={pais_codigo:codigo,pais_nome:meta.nome,moeda,plataforma_pagamento:plataforma,pagamentos_ativos:req.body?.pagamentos_ativos!==false,atualizado_em:new Date().toISOString()};
   const {data,error}=await getSupabase().from('configuracao_comercial_pais').upsert(payload,{onConflict:'pais_codigo'}).select().single();
   if(error) throw error;
-  res.json({ok:true,configuracao:Object.assign({},data,{integracao_disponivel:plataformaDisponivelNoServidor(plataforma,codigo,moeda)})});
+  // Mantém preços e cupons do país coerentes com a moeda comercial escolhida.
+  try{await getSupabase().from('precificacao_pais_servicos').update({moeda,atualizado_em:new Date().toISOString()}).eq('pais_codigo',codigo);}catch(_e){}
+  try{await getSupabase().from('cupons').update({moeda,atualizado_em:new Date().toISOString()}).eq('pais_codigo',codigo);}catch(_e){}
+  const recomendada=recomendacaoComercialPais(meta);
+  res.json({ok:true,configuracao:Object.assign({},data,recomendada,{integracao_disponivel:plataformaDisponivelNoServidor(plataforma,codigo,moeda)})});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar configuração comercial.'});}
 });
 app.get('/admin/precificacao-pais/:paisCodigo', async (req,res)=>{
