@@ -56,15 +56,34 @@ function limparCacheLocalizacaoIp(){
 
 
 const PAISES_COMERCIAIS = Object.freeze([
-  {codigo:'BR',nome:'Brasil',moeda:'BRL'},
-  {codigo:'AO',nome:'Angola',moeda:'AOA'},
-  {codigo:'CV',nome:'Cabo Verde',moeda:'CVE'},
-  {codigo:'GW',nome:'Guiné-Bissau',moeda:'XOF'},
-  {codigo:'GQ',nome:'Guiné Equatorial',moeda:'XAF'},
-  {codigo:'MZ',nome:'Moçambique',moeda:'MZN'},
-  {codigo:'PT',nome:'Portugal',moeda:'EUR'},
-  {codigo:'ST',nome:'São Tomé e Príncipe',moeda:'STN'},
-  {codigo:'TL',nome:'Timor-Leste',moeda:'USD'}
+  {codigo:'BR',nome:"Brasil",moeda:'BRL',grupo:'lusofono',configurado:true},
+  {codigo:'AO',nome:"Angola",moeda:'AOA',grupo:'lusofono',configurado:true},
+  {codigo:'CV',nome:"Cabo Verde",moeda:'CVE',grupo:'lusofono',configurado:true},
+  {codigo:'GW',nome:"Guiné-Bissau",moeda:'XOF',grupo:'lusofono',configurado:true},
+  {codigo:'GQ',nome:"Guiné Equatorial",moeda:'XAF',grupo:'lusofono',configurado:true},
+  {codigo:'MZ',nome:"Moçambique",moeda:'MZN',grupo:'lusofono',configurado:true},
+  {codigo:'PT',nome:"Portugal",moeda:'EUR',grupo:'lusofono',configurado:true},
+  {codigo:'ST',nome:"São Tomé e Príncipe",moeda:'STN',grupo:'lusofono',configurado:true},
+  {codigo:'TL',nome:"Timor-Leste",moeda:'USD',grupo:'lusofono',configurado:true},
+  {codigo:'US',nome:"Estados Unidos",moeda:'USD',grupo:'prioritario',configurado:false},
+  {codigo:'CA',nome:"Canadá",moeda:'CAD',grupo:'prioritario',configurado:false},
+  {codigo:'ES',nome:"Espanha",moeda:'EUR',grupo:'prioritario',configurado:false},
+  {codigo:'FR',nome:"França",moeda:'EUR',grupo:'prioritario',configurado:false},
+  {codigo:'DE',nome:"Alemanha",moeda:'EUR',grupo:'prioritario',configurado:false},
+  {codigo:'GB',nome:"Reino Unido",moeda:'GBP',grupo:'prioritario',configurado:false},
+  {codigo:'IT',nome:"Itália",moeda:'EUR',grupo:'prioritario',configurado:false},
+  {codigo:'NL',nome:"Países Baixos",moeda:'EUR',grupo:'prioritario',configurado:false},
+  {codigo:'IE',nome:"Irlanda",moeda:'EUR',grupo:'prioritario',configurado:false},
+  {codigo:'CH',nome:"Suíça",moeda:'CHF',grupo:'prioritario',configurado:false},
+  {codigo:'AU',nome:"Austrália",moeda:'AUD',grupo:'prioritario',configurado:false},
+  {codigo:'NZ',nome:"Nova Zelândia",moeda:'NZD',grupo:'prioritario',configurado:false},
+  {codigo:'MX',nome:"México",moeda:'MXN',grupo:'prioritario',configurado:false},
+  {codigo:'AR',nome:"Argentina",moeda:'ARS',grupo:'prioritario',configurado:false},
+  {codigo:'CL',nome:"Chile",moeda:'CLP',grupo:'prioritario',configurado:false},
+  {codigo:'CO',nome:"Colômbia",moeda:'COP',grupo:'prioritario',configurado:false},
+  {codigo:'JP',nome:"Japão",moeda:'JPY',grupo:'prioritario',configurado:false},
+  {codigo:'KR',nome:"Coreia do Sul",moeda:'KRW',grupo:'prioritario',configurado:false},
+  {codigo:'AE',nome:"Emirados Árabes Unidos",moeda:'AED',grupo:'prioritario',configurado:false}
 ]);
 const PAIS_COMERCIAL_POR_CODIGO = new Map(PAISES_COMERCIAIS.map(p=>[p.codigo,p]));
 const PAIS_COMERCIAL_POR_NOME = new Map(PAISES_COMERCIAIS.map(p=>[p.nome.toLowerCase(),p]));
@@ -2325,6 +2344,51 @@ app.post('/admin/eventos/:id/sincronizar-planilha', async (req,res)=>{
   }
 });
 
+
+
+
+// Fase 6.11 — catálogo administrável de países.
+async function obterCatalogoPaises(){
+  try{
+    const {data,error}=await getSupabase().from('paises_disponiveis').select('*').order('ordem',{ascending:true}).order('nome',{ascending:true});
+    if(error) throw error;
+    if(Array.isArray(data)&&data.length) return data;
+  }catch(e){ console.warn('Catálogo de países indisponível; usando catálogo incorporado:',e.message||e); }
+  return PAISES_COMERCIAIS.map((p,i)=>({codigo_iso:p.codigo,nome:p.nome,moeda:p.moeda,grupo:p.grupo,habilitado:true,configurado:p.configurado,ordem:i+1}));
+}
+
+app.get('/paises-disponiveis', async (req,res)=>{
+  try{
+    const catalogo=await obterCatalogoPaises();
+    res.json({ok:true,paises:catalogo.filter(p=>p.habilitado!==false)});
+  }catch(e){res.status(500).json({error:e.message||'Erro ao carregar países disponíveis.'});}
+});
+
+app.get('/admin/paises-disponiveis', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    res.json({ok:true,paises:await obterCatalogoPaises()});
+  }catch(e){res.status(500).json({error:e.message||'Erro ao carregar catálogo de países.'});}
+});
+
+app.patch('/admin/paises-disponiveis', async (req,res)=>{
+  try{
+    if(!admin(req,res)) return;
+    const recebidos=Array.isArray(req.body?.paises)?req.body.paises:[];
+    const permitidos=new Map(PAISES_COMERCIAIS.map(p=>[p.codigo,p]));
+    const agora=new Date().toISOString();
+    const linhas=recebidos.map((item,indice)=>{
+      const codigo=String(item?.codigo_iso||'').trim().toUpperCase();
+      const meta=permitidos.get(codigo);
+      if(!meta) return null;
+      return {codigo_iso:codigo,nome:meta.nome,moeda:meta.moeda,grupo:meta.grupo,habilitado:item?.habilitado===true,configurado:item?.configurado===true||meta.configurado===true,ordem:Number.isFinite(Number(item?.ordem))?Number(item.ordem):indice+1,atualizado_em:agora};
+    }).filter(Boolean);
+    if(!linhas.length) return res.status(400).json({error:'Nenhum país válido foi informado.'});
+    const {data,error}=await getSupabase().from('paises_disponiveis').upsert(linhas,{onConflict:'codigo_iso'}).select();
+    if(error) throw error;
+    res.json({ok:true,paises:data});
+  }catch(e){res.status(500).json({error:e.message||'Erro ao salvar catálogo de países.'});}
+});
 
 app.get('/formulario-config', async (req,res)=>{
   try{
