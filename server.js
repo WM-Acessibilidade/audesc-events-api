@@ -36,6 +36,25 @@ const MERCADOPAGO_NOTIFICATION_URL = process.env.MERCADOPAGO_NOTIFICATION_URL ||
 const AUDESC_WEB_URL = process.env.AUDESC_WEB_URL || 'https://wm-acessibilidade.github.io/audesc-web';
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 
+// Fase 6.10 — localização inicial aproximada por IP.
+// Mantém apenas país e unidade administrativa em cache de memória; não persiste IP, coordenadas ou histórico.
+const CACHE_LOCALIZACAO_IP_TTL_MS = 24 * 60 * 60 * 1000;
+const cacheLocalizacaoIp = new Map();
+function ipCliente(req){
+  const encaminhado=String(req.headers['x-forwarded-for']||'').split(',')[0].trim();
+  const real=String(req.headers['x-real-ip']||'').trim();
+  return (encaminhado||real||req.ip||req.socket?.remoteAddress||'').replace(/^::ffff:/,'');
+}
+function ipPrivadoOuLocal(ip){
+  const v=String(ip||'').trim().toLowerCase();
+  return !v || v==='::1' || v==='127.0.0.1' || v.startsWith('10.') || v.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./.test(v) || v.startsWith('fc') || v.startsWith('fd');
+}
+function limparCacheLocalizacaoIp(){
+  const agora=Date.now();
+  for(const [chave,item] of cacheLocalizacaoIp.entries()) if(!item || item.expiraEm<=agora) cacheLocalizacaoIp.delete(chave);
+}
+
+
 const PAISES_COMERCIAIS = Object.freeze([
   {codigo:'BR',nome:'Brasil',moeda:'BRL'},
   {codigo:'AO',nome:'Angola',moeda:'AOA'},
@@ -1547,6 +1566,40 @@ async function sugerirNominatimLocais(query, ctx){
   return {resultados,indisponivel:false,status:200};
 }
 
+
+
+app.get('/localizacao-aproximada', async (req,res)=>{
+  const ip=ipCliente(req);
+  if(ipPrivadoOuLocal(ip)) return res.status(503).json({ok:false,error:'Não foi possível identificar a localização aproximada deste acesso.'});
+  limparCacheLocalizacaoIp();
+  const chave=crypto.createHash('sha256').update(ip).digest('hex');
+  const salvo=cacheLocalizacaoIp.get(chave);
+  if(salvo && salvo.expiraEm>Date.now()) return res.json({ok:true,localizacao:salvo.localizacao,fonte:'cache'});
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),4500);
+  try{
+    const url='https://ipapi.co/'+encodeURIComponent(ip)+'/json/';
+    const resposta=await fetch(url,{headers:{Accept:'application/json','User-Agent':'Audesc/21.5.0'},signal:controller.signal});
+    const dados=await resposta.json().catch(()=>({}));
+    if(!resposta.ok || dados.error) throw new Error(dados.reason||dados.message||('HTTP '+resposta.status));
+    const paisCodigo=String(dados.country_code||'').toUpperCase();
+    const unidadeCodigo=String(dados.region_code||'').toUpperCase();
+    if(!paisCodigo) throw new Error('País não identificado.');
+    const localizacao={
+      pais_codigo:paisCodigo,
+      pais_nome:String(dados.country_name||''),
+      unidade_codigo:unidadeCodigo,
+      unidade_nome:String(dados.region||''),
+      fonte:'ip',
+      aproximada:true
+    };
+    cacheLocalizacaoIp.set(chave,{localizacao,expiraEm:Date.now()+CACHE_LOCALIZACAO_IP_TTL_MS});
+    return res.json({ok:true,localizacao,fonte:'ip'});
+  }catch(e){
+    console.warn('Localização aproximada por IP indisponível:',e.message||e);
+    return res.status(503).json({ok:false,error:'Localização aproximada temporariamente indisponível.'});
+  }finally{clearTimeout(timer);}
+});
 app.get('/geocode/sugestoes', async (req,res)=>{
   try{
     const query=limit(req.query.q,300);
