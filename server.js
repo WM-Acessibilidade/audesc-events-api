@@ -3252,6 +3252,92 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar janela de transmissão.'})}
 });
 
+
+
+// Fase 6.13 - Avaliacao pos-transmissao
+const AVALIACAO_PADRAO = {ativa:true,prazo_minutos:60,participacao_minima_minutos:1,permitir_edicao:true,comentario_ativo:true};
+async function obterConfigAvaliacao(){
+  try{
+    const {data,error}=await getSupabase().from('configuracao_avaliacoes').select('*').eq('id',1).maybeSingle();
+    if(error) throw error;
+    return Object.assign({},AVALIACAO_PADRAO,data||{});
+  }catch(e){ return Object.assign({},AVALIACAO_PADRAO); }
+}
+function idOuvinteValido(v){ return /^[a-zA-Z0-9_-]{16,100}$/.test(String(v||'')); }
+
+app.post('/public/salas/:sala/participacao', async (req,res)=>{
+ try{
+  const sala=limit(req.params.sala,120), b=req.body||{}, ouvinte_id=limit(b.ouvinte_id,100);
+  if(!sala || !idOuvinteValido(ouvinte_id)) return res.status(400).json({error:'Identificacao de participacao invalida.'});
+  const ev=await buscarEventoOuPlanilhaPorSala(getSupabase(),sala,'id,sala_codigo,status_operacao,status_publicacao');
+  if(!ev) return res.status(404).json({error:'Sala nao encontrada.'});
+  const agora=new Date().toISOString();
+  const sb=getSupabase();
+  const {data:existente}=await sb.from('participacoes_transmissoes').select('*').eq('evento_id',ev.id).eq('ouvinte_id',ouvinte_id).maybeSingle();
+  const entrada=existente&&existente.primeira_entrada ? existente.primeira_entrada : agora;
+  const payload={evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,ouvinte_id,nome_ouvinte:limit(b.nome_ouvinte,120),primeira_entrada:entrada,ultima_atividade:agora,ultima_saida:null,reconexoes:Math.max(0,Number(existente&&existente.reconexoes||0)+(existente?1:0))};
+  const {error}=await sb.from('participacoes_transmissoes').upsert(payload,{onConflict:'evento_id,ouvinte_id'}); if(error) throw error;
+  res.json({ok:true,registrado:true});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao registrar participacao.'})}
+});
+app.post('/public/salas/:sala/participacao/atividade', async (req,res)=>{
+ try{
+  const sala=limit(req.params.sala,120), b=req.body||{}, ouvinte_id=limit(b.ouvinte_id,100);
+  if(!sala || !idOuvinteValido(ouvinte_id)) return res.status(400).json({error:'Identificacao invalida.'});
+  const {error}=await getSupabase().from('participacoes_transmissoes').update({ultima_atividade:new Date().toISOString()}).eq('sala_codigo',sala).eq('ouvinte_id',ouvinte_id); if(error) throw error;
+  res.json({ok:true});
+ }catch(e){res.status(500).json({error:e.message||'Erro ao atualizar participacao.'})}
+});
+app.post('/public/salas/:sala/participacao/saida', async (req,res)=>{
+ try{ const sala=limit(req.params.sala,120), id=limit((req.body||{}).ouvinte_id,100); if(!idOuvinteValido(id)) return res.status(400).json({error:'Identificacao invalida.'});
+  const agora=new Date().toISOString(); const {error}=await getSupabase().from('participacoes_transmissoes').update({ultima_atividade:agora,ultima_saida:agora}).eq('sala_codigo',sala).eq('ouvinte_id',id); if(error) throw error; res.json({ok:true});
+ }catch(e){res.status(500).json({error:e.message||'Erro ao registrar saida.'})}
+});
+app.post('/salas/:sala/encerrar-transmissao', async (req,res)=>{
+ try{
+  const sala=limit(req.params.sala,120), senha=String((req.body||{}).senha||'').trim();
+  const ev=await buscarEventoOuPlanilhaPorSala(getSupabase(),sala,'id,sala_codigo,senha_transmissor,titulo_original,titulo_publicado');
+  if(!ev) return res.status(404).json({error:'Sala nao encontrada.'});
+  if(!senhaAdminValida(senha) && senha!==String(ev.senha_transmissor||'')) return res.status(403).json({error:'Senha do transmissor invalida.'});
+  const cfg=await obterConfigAvaliacao(), fim=new Date(), expira=new Date(fim.getTime()+Math.max(15,Number(cfg.prazo_minutos||60))*60000);
+  const sb=getSupabase();
+  const {error:se}=await sb.from('sessoes_avaliacao').upsert({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,encerrada_em:fim.toISOString(),avaliacao_expira_em:expira.toISOString(),avaliacao_ativa:cfg.ativa!==false},{onConflict:'evento_id'}); if(se) throw se;
+  let elegiveis=0;
+  if(cfg.ativa!==false){
+    const {data:parts,error:pe}=await sb.from('participacoes_transmissoes').select('*').eq('evento_id',ev.id).lte('primeira_entrada',fim.toISOString()); if(pe) throw pe;
+    const minMs=Math.max(0,Number(cfg.participacao_minima_minutos||1))*60000;
+    const rows=(parts||[]).filter(p=> Math.max(0,fim.getTime()-new Date(p.primeira_entrada).getTime())>=minMs).map(p=>({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,ouvinte_id:p.ouvinte_id,elegivel:true,definido_em:fim.toISOString(),expira_em:expira.toISOString()}));
+    if(rows.length){ const {error:ee}=await sb.from('elegibilidade_avaliacoes').upsert(rows,{onConflict:'evento_id,ouvinte_id'}); if(ee) throw ee; elegiveis=rows.length; }
+  }
+  res.json({ok:true,avaliacao_ativa:cfg.ativa!==false,elegiveis,encerrada_em:fim.toISOString(),expira_em:expira.toISOString(),prazo_minutos:Number(cfg.prazo_minutos||60)});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao encerrar transmissao.'})}
+});
+app.get('/public/salas/:sala/avaliacao/status', async (req,res)=>{
+ try{
+  const sala=limit(req.params.sala,120), id=limit(req.query.ouvinte_id,100); if(!idOuvinteValido(id)) return res.status(400).json({error:'Identificacao invalida.'});
+  const sb=getSupabase(); const {data:el,error}=await sb.from('elegibilidade_avaliacoes').select('*').eq('sala_codigo',sala).eq('ouvinte_id',id).maybeSingle(); if(error) throw error;
+  if(!el) return res.json({ok:true,encerrada:false,elegivel:false,disponivel:false});
+  const expirou=new Date(el.expira_em).getTime()<Date.now(); const {data:av}=await sb.from('avaliacoes_transmissoes').select('*').eq('evento_id',el.evento_id).eq('ouvinte_id',id).maybeSingle();
+  res.json({ok:true,encerrada:true,elegivel:!!el.elegivel,disponivel:!!el.elegivel&&!expirou,expirou,expira_em:el.expira_em,avaliacao:av||null});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar avaliacao.'})}
+});
+app.post('/public/salas/:sala/avaliacao', async (req,res)=>{
+ try{
+  const sala=limit(req.params.sala,120), b=req.body||{}, id=limit(b.ouvinte_id,100); if(!idOuvinteValido(id)) return res.status(400).json({error:'Identificacao invalida.'});
+  const sb=getSupabase(); const {data:el,error}=await sb.from('elegibilidade_avaliacoes').select('*').eq('sala_codigo',sala).eq('ouvinte_id',id).maybeSingle(); if(error) throw error;
+  if(!el||!el.elegivel) return res.status(403).json({error:'Somente ouvintes presentes antes do encerramento podem avaliar.'});
+  if(new Date(el.expira_em).getTime()<Date.now()) return res.status(410).json({error:'O periodo de avaliacao foi encerrado.'});
+  const geral=Number(b.avaliacao_geral), ad=Number(b.qualidade_audiodescricao), audio=Number(b.qualidade_audio), autonomia=Number(b.autonomia), rec=b.recomendacao===''||b.recomendacao==null?null:Number(b.recomendacao);
+  if(![geral,ad,audio,autonomia].every(n=>Number.isInteger(n)&&n>=1&&n<=5)) return res.status(400).json({error:'Preencha todas as avaliacoes obrigatorias.'});
+  if(rec!==null && (!Number.isInteger(rec)||rec<0||rec>10)) return res.status(400).json({error:'A recomendacao deve estar entre 0 e 10.'});
+  const payload={evento_id:el.evento_id,sala_codigo:sala,ouvinte_id:id,avaliacao_geral:geral,qualidade_audiodescricao:ad,qualidade_audio:audio,autonomia,recomendacao:rec,comentario:limit(b.comentario,1000),atualizada_em:new Date().toISOString()};
+  const {error:ae}=await sb.from('avaliacoes_transmissoes').upsert(payload,{onConflict:'evento_id,ouvinte_id'}); if(ae) throw ae; res.json({ok:true,mensagem:'Avaliacao registrada com sucesso.'});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar avaliacao.'})}
+});
+app.get('/admin/avaliacoes/configuracao', async (req,res)=>{if(!admin(req,res))return;res.json({ok:true,config:await obterConfigAvaliacao()})});
+app.put('/admin/avaliacoes/configuracao', async (req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},payload={id:1,ativa:b.ativa!==false,prazo_minutos:Math.max(15,Math.min(120,Number(b.prazo_minutos||60))),participacao_minima_minutos:Math.max(0,Math.min(60,Number(b.participacao_minima_minutos||1))),permitir_edicao:b.permitir_edicao!==false,comentario_ativo:b.comentario_ativo!==false,updated_at:new Date().toISOString()};const {error}=await getSupabase().from('configuracao_avaliacoes').upsert(payload);if(error)throw error;res.json({ok:true,config:payload})}catch(e){res.status(500).json({error:e.message})}});
+app.get('/admin/avaliacoes', async (req,res)=>{if(!admin(req,res))return;try{const {data,error}=await getSupabase().from('avaliacoes_transmissoes').select('*').order('atualizada_em',{ascending:false}).limit(1000);if(error)throw error;res.json({ok:true,avaliacoes:data||[]})}catch(e){res.status(500).json({error:e.message})}});
+
 app.get('/public/eventos', async (req,res)=>{
  try{
   const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,categoria_evento,classificacao_etaria,modalidade_evento,abrangencia_divulgacao,paises_divulgacao,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
