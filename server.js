@@ -3350,6 +3350,15 @@ async function avaliacaoInstantaneaAtiva(){
     return {ativa:data?.avaliacao_instantanea_ativa!==false, comentario:data?.comentario_instantaneo_ativo!==false};
   }catch(e){ return {ativa:true,comentario:true}; }
 }
+app.get('/public/avaliacoes/configuracao', async (req,res)=>{
+  try{
+    const cfg=await avaliacaoInstantaneaAtiva();
+    res.set('Cache-Control','no-store');
+    res.json({ok:true,avaliacao_instantanea_ativa:cfg.ativa,comentario_instantaneo_ativo:cfg.comentario});
+  }catch(e){
+    res.status(500).json({error:e.message||'Erro ao consultar configuracao das avaliacoes.'});
+  }
+});
 app.post('/salas/:sala/avaliacao-instantanea/pedidos', async (req,res)=>{
  try{
   const sala=limit(req.params.sala,120), b=req.body||{}, senha=String(b.senha||'').trim();
@@ -3371,15 +3380,17 @@ app.post('/salas/:sala/avaliacao-instantanea/pedidos', async (req,res)=>{
 });
 app.get('/public/salas/:sala/avaliacao-instantanea/status', async (req,res)=>{
  try{
+  const cfg=await avaliacaoInstantaneaAtiva();
+  if(!cfg.ativa) return res.json({ok:true,ativa:false,disponivel:false});
   const sala=limit(req.params.sala,120), id=limit(req.query.ouvinte_id,100); if(!idOuvinteValido(id)) return res.status(400).json({error:'Identificacao invalida.'});
   const sb=getSupabase(), agora=new Date().toISOString();
   const {data:els,error}=await sb.from('elegibilidade_avaliacao_audiodescricao').select('*,pedidos_avaliacao_audiodescricao(*)').eq('sala_codigo',sala).eq('ouvinte_id',id).order('definido_em',{ascending:false}).limit(5); if(error) throw error;
   for(const el of (els||[])){
     const p=el.pedidos_avaliacao_audiodescricao; if(!p||!p.ativo||p.expira_em<=agora) continue;
     const {data:av}=await sb.from('avaliacoes_instantaneas_audiodescricao').select('id').eq('pedido_id',p.id).eq('ouvinte_id',id).maybeSingle();
-    if(!av) return res.json({ok:true,disponivel:true,pedido_id:p.id,expira_em:p.expira_em,mensagem:'Por gentileza, avalie a minha audiodescricao.'});
+    if(!av) return res.json({ok:true,ativa:true,disponivel:true,pedido_id:p.id,expira_em:p.expira_em,mensagem:'Por gentileza, avalie a minha audiodescricao.'});
   }
-  res.json({ok:true,disponivel:false});
+  res.json({ok:true,ativa:true,disponivel:false});
  }catch(e){res.status(500).json({error:e.message||'Erro ao consultar pedido.'})}
 });
 app.post('/public/salas/:sala/avaliacao-instantanea', async (req,res)=>{
