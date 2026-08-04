@@ -963,6 +963,15 @@ function valorLinhaPorIndices(row, indices){
   return '';
 }
 
+function uuidEstavelParaSalaLegada(valor){
+  const hex = crypto.createHash('sha256').update(String(valor || '')).digest('hex').slice(0, 32).split('');
+  // UUID v5-like determinístico: mesma sala sempre produz o mesmo UUID válido.
+  hex[12] = '5';
+  hex[16] = ['8','9','a','b'][parseInt(hex[16], 16) % 4];
+  const h = hex.join('');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
+}
+
 async function buscarSalaNaPlanilha(sala, password){
   const codigo = normalizarCodigoSalaBusca(sala);
   if(!codigo) return null;
@@ -1036,7 +1045,8 @@ async function buscarSalaNaPlanilha(sala, password){
       }
 
       return {
-        id: `planilha-${i+1}`,
+        id: uuidEstavelParaSalaLegada(`google-sheets:${salaPlanilha}`),
+        id_legado: `planilha-${i+1}`,
         origem: 'google_sheets',
         titulo_original: valorLinhaPorIndices(row, [idxTitulo, 2]) || 'Evento Audesc',
         titulo_publicado: valorLinhaPorIndices(row, [idxTitulo, 2]) || 'Evento Audesc',
