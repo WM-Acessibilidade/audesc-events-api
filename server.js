@@ -3388,6 +3388,27 @@ app.post('/salas/:sala/avaliacao-instantanea/pedidos', async (req,res)=>{
   res.json({ok:true,pedido_id:pedido.id,expira_em:expira.toISOString(),prazo_minutos:15,elegiveis:rows.length,comentario_ativo:cfg.comentario});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao criar pedido de avaliacao.'})}
 });
+
+app.get('/salas/:sala/avaliacao-instantanea/estado-transmissor', async (req,res)=>{
+ try{
+  const sala=limit(req.params.sala,120), senha=String(req.query.senha||'').trim();
+  const ev=await buscarEventoOuPlanilhaPorSala(getSupabase(),sala,'id,sala_codigo,senha_transmissor');
+  if(!ev) return res.status(404).json({error:'Sala nao encontrada.'});
+  if(!senhaAdminValida(senha) && senha!==String(ev.senha_transmissor||'')) return res.status(403).json({error:'Senha do transmissor invalida.'});
+  const cfg=await avaliacaoInstantaneaAtiva();
+  if(!cfg.ativa) return res.json({ok:true,ativa:false,pode_solicitar:false});
+  const sb=getSupabase();
+  const {data:ultimos,error}=await sb.from('pedidos_avaliacao_audiodescricao').select('*').eq('evento_id',ev.id).order('criado_em',{ascending:false}).limit(1);
+  if(error) throw error;
+  const ultimo=ultimos&&ultimos[0];
+  if(!ultimo) return res.json({ok:true,ativa:true,pode_solicitar:true});
+  const proximo=new Date(new Date(ultimo.criado_em).getTime()+AVALIACAO_INSTANTANEA_INTERVALO_MINUTOS*60000);
+  const pode=proximo.getTime()<=Date.now();
+  res.set('Cache-Control','no-store');
+  res.json({ok:true,ativa:true,pode_solicitar:pode,proximo_pedido_em:proximo.toISOString(),pedido_atual:{id:ultimo.id,expira_em:ultimo.expira_em,ativo:ultimo.ativo!==false}});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar estado da avaliacao instantanea.'})}
+});
+
 app.get('/public/salas/:sala/avaliacao-instantanea/status', async (req,res)=>{
  try{
   const cfg=await avaliacaoInstantaneaAtiva();
