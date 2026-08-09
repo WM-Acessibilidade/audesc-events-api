@@ -3299,6 +3299,72 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
   if(!sala) return res.status(400).json({error:'Código da sala não informado.'});
   const data = await buscarEventoOuPlanilhaPorSala(getSupabase(), sala, 'id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,margem_transmissao_minutos,status_operacao,created_at');
   if(!data) return res.status(404).json({error:'Sala não encontrada.', sala_consultada:sala});
+
+  // Fase 6.15.2: uma demonstração não possui uma única janela fixa.
+  // Cada entrada do transmissor pode iniciar uma nova sessão, até o limite contratado.
+  if(data.tipo_sala === 'demonstracao' && data.demonstracao){
+    const d = data.demonstracao;
+    const agora = new Date();
+    const modo = String(req.query.modo || '').toLowerCase();
+    const inicio = d.sessao_atual_iniciada_em ? new Date(d.sessao_atual_iniciada_em) : null;
+    const fimPrevisto = inicio && !Number.isNaN(inicio.getTime())
+      ? new Date(inicio.getTime() + Number(d.duracao_sessao_minutos || 0) * 60000)
+      : null;
+    const sessaoAtiva = !!(inicio && !d.sessao_atual_encerrada_em && fimPrevisto && fimPrevisto > agora);
+    const expirada = new Date(d.expira_em).getTime() <= agora.getTime();
+    const bloqueada = !d.ativa || !!d.bloqueada;
+    const utilizadas = Number(d.sessoes_utilizadas || 0);
+    const limite = Number(d.limite_sessoes || 0);
+    const restantes = Math.max(0, limite - utilizadas);
+
+    if(modo === 'entrada-transmissor' && !sessaoAtiva){
+      let mensagem = 'A sala de demonstração está disponível para iniciar uma nova sessão.';
+      let permitido = true;
+      if(bloqueada){ permitido = false; mensagem = 'Esta sala de demonstração está bloqueada ou inativa.'; }
+      else if(expirada){ permitido = false; mensagem = 'A validade desta sala de demonstração terminou.'; }
+      else if(restantes <= 0){ permitido = false; mensagem = 'O número máximo de sessões desta demonstração foi atingido.'; }
+      return res.json({
+        ok:true, configurado:true, tipo_sala:'demonstracao',
+        permitido_entrar:permitido, permitido_permanecer:permitido,
+        antes_da_liberacao:false, apos_encerramento:!permitido,
+        margem_transmissao_minutos:0, minutos_ate_liberacao:0, minutos_restantes:0,
+        sessoes_utilizadas:utilizadas, limite_sessoes:limite, sessoes_restantes:restantes,
+        sala_codigo:data.sala_codigo, evento:data.titulo_publicado || data.titulo_original || 'Sala de Demonstração Audesc',
+        status_operacao:data.status_operacao || null, mensagem
+      });
+    }
+
+    if(sessaoAtiva){
+      const minutosRestantes = Math.max(0, Math.ceil((fimPrevisto.getTime() - agora.getTime()) / 60000));
+      return res.json({
+        ok:true, configurado:true, tipo_sala:'demonstracao',
+        permitido_entrar:!bloqueada && !expirada, permitido_permanecer:!bloqueada && !expirada,
+        antes_da_liberacao:false, apos_encerramento:false, margem_transmissao_minutos:0,
+        inicio_evento:inicio.toISOString(), liberacao_transmissao:inicio.toISOString(),
+        termino_evento:fimPrevisto.toISOString(), encerramento_transmissao:fimPrevisto.toISOString(),
+        minutos_ate_liberacao:0, minutos_restantes:minutosRestantes,
+        sessoes_utilizadas:utilizadas, limite_sessoes:limite, sessoes_restantes:restantes,
+        sala_codigo:data.sala_codigo, evento:data.titulo_publicado || data.titulo_original || 'Sala de Demonstração Audesc',
+        status_operacao:data.status_operacao || null,
+        mensagem:`Restam ${minutosRestantes} minuto(s) para o encerramento desta sessão de demonstração.`
+      });
+    }
+
+    // Fora do modo de entrada, uma sessão anterior expirada deve ser tratada como encerrada.
+    return res.json({
+      ok:true, configurado:true, tipo_sala:'demonstracao',
+      permitido_entrar:false, permitido_permanecer:false,
+      antes_da_liberacao:false, apos_encerramento:true, margem_transmissao_minutos:0,
+      minutos_ate_liberacao:0, minutos_restantes:0,
+      sessoes_utilizadas:utilizadas, limite_sessoes:limite, sessoes_restantes:restantes,
+      sala_codigo:data.sala_codigo, evento:data.titulo_publicado || data.titulo_original || 'Sala de Demonstração Audesc',
+      status_operacao:data.status_operacao || null,
+      mensagem: restantes > 0
+        ? 'A sessão anterior foi encerrada. O transmissor pode iniciar uma nova sessão.'
+        : 'A sessão foi encerrada e o número máximo de sessões desta demonstração foi atingido.'
+    });
+  }
+
   const status = statusJanelaTransmissao(data);
   res.json(Object.assign(status, {
     sala_codigo:data.sala_codigo,
