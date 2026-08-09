@@ -1070,10 +1070,37 @@ async function buscarSalaNaPlanilha(sala, password){
   return null;
 }
 
+async function buscarDemonstracaoPorSala(sb, sala){
+  const codigo = normalizarCodigoSalaBusca(sala);
+  if(!codigo) return null;
+  const {data,error}=await sb.from('salas_demonstracao').select('*').ilike('sala_codigo',codigo).limit(1);
+  if(error) throw error;
+  if(!data || !data.length) return null;
+  const d=data[0];
+  return {id:d.id,tipo_sala:'demonstracao',origem:'demonstracao',titulo_original:d.nome||'Sala de Demonstração Audesc',titulo_publicado:d.nome||'Sala de Demonstração Audesc',sala_codigo:d.sala_codigo,senha_transmissor:d.senha_transmissor,status_operacao:(d.ativa&&!d.bloqueada&&new Date(d.expira_em)>new Date())?'liberado':'nao_liberado',status_publicacao:'aprovado',max_ouvintes:d.limite_ouvintes,duracao_horas:Number(d.duracao_sessao_minutos||0)/60,data_evento:d.sessao_atual_iniciada_em,margem_transmissao_minutos:0,demonstracao:d};
+}
 async function buscarEventoOuPlanilhaPorSala(sb, sala, campos, opts){
   const ev = await buscarEventoPorSala(sb, sala, campos);
   if(ev) return ev;
+  const demo = await buscarDemonstracaoPorSala(sb, sala);
+  if(demo) return demo;
   return await buscarSalaNaPlanilha(sala, opts && opts.password);
+}
+async function iniciarSessaoDemonstracao(sb, ev){
+  if(!ev||ev.tipo_sala!=='demonstracao'||!ev.demonstracao) return ev;
+  let d=ev.demonstracao; const agora=new Date();
+  if(!d.ativa||d.bloqueada) throw new Error('Esta sala de demonstração está bloqueada ou inativa.');
+  if(new Date(d.expira_em)<=agora) throw new Error('A validade desta sala de demonstração terminou.');
+  const inicio=d.sessao_atual_iniciada_em?new Date(d.sessao_atual_iniciada_em):null;
+  const fimPrevisto=inicio?new Date(inicio.getTime()+Number(d.duracao_sessao_minutos)*60000):null;
+  const sessaoAtiva=inicio&&!d.sessao_atual_encerrada_em&&fimPrevisto>agora;
+  if(!sessaoAtiva){
+    if(Number(d.sessoes_utilizadas||0)>=Number(d.limite_sessoes||0)) throw new Error('O número máximo de sessões desta demonstração foi atingido.');
+    const novoInicio=agora.toISOString();
+    const {data,error}=await sb.from('salas_demonstracao').update({sessoes_utilizadas:Number(d.sessoes_utilizadas||0)+1,sessao_atual_iniciada_em:novoInicio,sessao_atual_encerrada_em:null,updated_at:novoInicio}).eq('id',d.id).select('*').single();
+    if(error) throw error; d=data;
+  }
+  ev.demonstracao=d; ev.data_evento=d.sessao_atual_iniciada_em; ev.duracao_horas=Number(d.duracao_sessao_minutos||0)/60; ev.max_ouvintes=d.limite_ouvintes; return ev;
 }
 
 function senhaAdminValida(password){
@@ -1876,7 +1903,7 @@ async function gerarSenhaUnica(sb){
     const senha = password6();
     const { data, error } = await sb.from('eventos').select('id').eq('senha_transmissor', senha).limit(1);
     if(error) throw error;
-    if(!data || data.length === 0) return senha;
+    if(!data || data.length === 0){ const q=await sb.from('salas_demonstracao').select('id').eq('senha_transmissor',senha).limit(1); if(q.error) throw q.error; if(!q.data || q.data.length===0) return senha; }
   }
   throw new Error('Não foi possível gerar senha única.');
 }
@@ -1886,7 +1913,7 @@ async function gerarSalaUnica(sb){
     const sala = makeRoom();
     const { data, error } = await sb.from('eventos').select('id').eq('sala_codigo', sala).limit(1);
     if(error) throw error;
-    if(!data || data.length === 0) return sala;
+    if(!data || data.length === 0){ const q=await sb.from('salas_demonstracao').select('id').eq('sala_codigo',sala).limit(1); if(q.error) throw q.error; if(!q.data || q.data.length===0) return sala; }
   }
   throw new Error('Não foi possível gerar código de sala único.');
 }
@@ -3104,6 +3131,22 @@ app.patch('/admin/eventos/:id', async (req, res) => {
 
 
 
+async function obterConfigDemonstracoes(){
+  const {data,error}=await getSupabase().from('configuracao_demonstracoes').select('*').eq('id',1).maybeSingle(); if(error) throw error;
+  return data||{id:1,habilitada:false,validade_meses:1,limite_ouvintes:5,duracao_sessao_minutos:30,limite_sessoes:3,limite_geral_pedidos:100,limite_pedidos_email:1,apenas_uma_ativa_email:true,pedidos_utilizados:0};
+}
+app.get('/admin/demonstracoes/configuracao',async(req,res)=>{if(!admin(req,res))return;try{res.json({ok:true,config:await obterConfigDemonstracoes()})}catch(e){res.status(500).json({error:e.message})}});
+app.put('/admin/demonstracoes/configuracao',async(req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},a=await obterConfigDemonstracoes(),payload={id:1,habilitada:b.habilitada===true,validade_meses:Math.max(1,Math.min(12,Number(b.validade_meses||1))),limite_ouvintes:Math.max(1,Math.min(20,Number(b.limite_ouvintes||5))),duracao_sessao_minutos:Math.max(20,Math.min(120,Number(b.duracao_sessao_minutos||30))),limite_sessoes:Math.max(1,Math.min(10,Number(b.limite_sessoes||3))),limite_geral_pedidos:Math.max(1,Math.min(1000,Number(b.limite_geral_pedidos||100))),limite_pedidos_email:Math.max(1,Math.min(10,Number(b.limite_pedidos_email||1))),apenas_uma_ativa_email:b.apenas_uma_ativa_email!==false,pedidos_utilizados:Number(a.pedidos_utilizados||0),updated_at:new Date().toISOString()};const {data,error}=await getSupabase().from('configuracao_demonstracoes').upsert(payload).select().single();if(error)throw error;res.json({ok:true,config:data})}catch(e){res.status(500).json({error:e.message})}});
+app.post('/admin/demonstracoes/zerar-contador-geral',async(req,res)=>{if(!admin(req,res))return;try{const {error}=await getSupabase().from('configuracao_demonstracoes').update({pedidos_utilizados:0,updated_at:new Date().toISOString()}).eq('id',1);if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:e.message})}});
+app.post('/admin/demonstracoes/zerar-contador-email',async(req,res)=>{if(!admin(req,res))return;try{const email=String((req.body||{}).email||'').trim().toLowerCase();if(!email)return res.status(400).json({error:'Informe o e-mail.'});const {error}=await getSupabase().from('demonstracao_contadores_email').upsert({email,pedidos_utilizados:0,updated_at:new Date().toISOString()});if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:e.message})}});
+app.get('/admin/demonstracoes/email-contador',async(req,res)=>{if(!admin(req,res))return;try{const email=String(req.query.email||'').trim().toLowerCase();const {data,error}=await getSupabase().from('demonstracao_contadores_email').select('*').eq('email',email).maybeSingle();if(error)throw error;res.json({ok:true,contador:data||{email,pedidos_utilizados:0,ultimo_pedido_em:null}})}catch(e){res.status(500).json({error:e.message})}});
+app.get('/admin/demonstracoes',async(req,res)=>{if(!admin(req,res))return;try{const q=String(req.query.q||'').trim().replace(/[%_,]/g,'');let query=getSupabase().from('salas_demonstracao').select('*').order('criada_em',{ascending:false}).limit(500);if(q)query=query.or(`email.ilike.%${q}%,sala_codigo.ilike.%${q}%`);const {data,error}=await query;if(error)throw error;res.json({ok:true,demonstracoes:data||[]})}catch(e){res.status(500).json({error:e.message})}});
+app.post('/admin/demonstracoes',async(req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},email=String(b.email||'').trim().toLowerCase();if(!email||!email.includes('@'))return res.status(400).json({error:'Informe um e-mail válido.'});const cfg=await obterConfigDemonstracoes(),sb=getSupabase(),sala=await gerarSalaUnica(sb),senha=await gerarSenhaUnica(sb),agora=new Date(),expira=new Date(agora);expira.setMonth(expira.getMonth()+Number(cfg.validade_meses||1));const payload={nome:limit(b.nome,120)||null,email,sala_codigo:sala,senha_transmissor:senha,origem:'manual',criada_em:agora.toISOString(),expira_em:expira.toISOString(),limite_ouvintes:cfg.limite_ouvintes,duracao_sessao_minutos:cfg.duracao_sessao_minutos,limite_sessoes:cfg.limite_sessoes,sessoes_utilizadas:0,ativa:true,bloqueada:false,updated_at:agora.toISOString()};const {data,error}=await sb.from('salas_demonstracao').insert(payload).select().single();if(error)throw error;const {data:c}=await sb.from('demonstracao_contadores_email').select('*').eq('email',email).maybeSingle();await sb.from('demonstracao_contadores_email').upsert({email,pedidos_utilizados:Number(c&&c.pedidos_utilizados||0)+1,ultimo_pedido_em:agora.toISOString(),updated_at:agora.toISOString()});await sb.from('configuracao_demonstracoes').update({pedidos_utilizados:Number(cfg.pedidos_utilizados||0)+1,updated_at:agora.toISOString()}).eq('id',1);res.json({ok:true,demonstracao:data})}catch(e){res.status(500).json({error:e.message})}});
+app.patch('/admin/demonstracoes/:id',async(req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},patch={updated_at:new Date().toISOString()};if('bloqueada'in b)patch.bloqueada=!!b.bloqueada;if('ativa'in b)patch.ativa=!!b.ativa;if(b.renovar_meses){const {data:at,error:ae}=await getSupabase().from('salas_demonstracao').select('*').eq('id',req.params.id).single();if(ae)throw ae;const base=new Date(at.expira_em)>new Date()?new Date(at.expira_em):new Date();base.setMonth(base.getMonth()+Math.max(1,Math.min(12,Number(b.renovar_meses))));patch.expira_em=base.toISOString();}const {data,error}=await getSupabase().from('salas_demonstracao').update(patch).eq('id',req.params.id).select().single();if(error)throw error;res.json({ok:true,demonstracao:data})}catch(e){res.status(500).json({error:e.message})}});
+app.delete('/admin/demonstracoes/:id',async(req,res)=>{if(!admin(req,res))return;try{const {error}=await getSupabase().from('salas_demonstracao').delete().eq('id',req.params.id);if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:e.message})}});
+app.get('/public/demonstracoes/configuracao',async(req,res)=>{try{const c=await obterConfigDemonstracoes();res.json({ok:true,habilitada:c.habilitada===true})}catch(e){res.status(500).json({error:e.message})}});
+
+
 
 app.get('/token', async (req,res)=>{
  try{
@@ -3113,7 +3156,7 @@ app.get('/token', async (req,res)=>{
   const password = String(req.query.password || req.query.senha || '').trim();
   if(!room) return res.status(400).json({error:'Código da sala não informado.'});
   const sb = getSupabase();
-  const ev = await buscarEventoOuPlanilhaPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao,max_ouvintes,duracao_horas,data_evento,latitude,longitude,exigir_gps_ouvintes,gps_raio_metros,gps_precisao_max_metros', {password});
+  let ev = await buscarEventoOuPlanilhaPorSala(sb, room, 'id,titulo_original,titulo_publicado,sala_codigo,senha_transmissor,status_operacao,status_publicacao,max_ouvintes,duracao_horas,data_evento,latitude,longitude,exigir_gps_ouvintes,gps_raio_metros,gps_precisao_max_metros', {password});
   if(!ev) return res.status(404).json({error:'Sala não encontrada no Audesc.', sala_consultada: room});
   const liberado = String(ev.status_operacao || '').toLowerCase() === 'liberado' || String(ev.status_publicacao || '').toLowerCase() === 'aprovado';
   if(!liberado) return res.status(403).json({error:'Esta sala ainda não está liberada.'});
@@ -3122,8 +3165,10 @@ app.get('/token', async (req,res)=>{
     const senhaOficial = String(ev.senha_transmissor || '').trim();
     if(!senhaOficial && !acessoAdmin) return res.status(403).json({error:'A sala ainda não possui senha de transmissor.'});
     if(!acessoAdmin && password !== senhaOficial) return res.status(403).json({error:'Senha do transmissor inválida.'});
+    if(ev.tipo_sala==='demonstracao') ev=await iniciarSessaoDemonstracao(sb,ev);
   }
   if(role === 'receiver'){
+    if(ev.tipo_sala==='demonstracao'){ const d=ev.demonstracao||{}; const inicio=d.sessao_atual_iniciada_em?new Date(d.sessao_atual_iniciada_em):null; const ativa=inicio&&!d.sessao_atual_encerrada_em&&new Date(inicio.getTime()+Number(d.duracao_sessao_minutos||0)*60000)>new Date(); if(!ativa) return res.status(403).json({error:'A demonstração ainda não possui uma sessão de transmissão ativa.'}); }
     const gps = validarGpsOuvinte(ev, req.query || {});
     if(!gps.ok) return res.status(403).json({error:gps.error || 'Entrada não autorizada pela localização.', gps});
   }
@@ -3141,6 +3186,7 @@ app.get('/token', async (req,res)=>{
     acesso: acessoAdmin ? 'admin' : 'padrao',
     evento: ev.titulo_publicado || ev.titulo_original || 'Evento Audesc',
     origem_sala: ev.origem || 'supabase',
+    tipo_sala: ev.tipo_sala || 'evento',
     origem_token:'audesc-events-api',
     gps: gpsConfigEvento(ev)
   });
@@ -3311,6 +3357,7 @@ app.post('/salas/:sala/encerrar-transmissao', async (req,res)=>{
   if(!senhaAdminValida(senha) && senha!==String(ev.senha_transmissor||'')) return res.status(403).json({error:'Senha do transmissor invalida.'});
   const cfg=await obterConfigAvaliacao(), fim=new Date(), expira=new Date(fim.getTime()+Math.max(15,Number(cfg.prazo_minutos||60))*60000);
   const sb=getSupabase();
+  if(ev.tipo_sala==='demonstracao' && ev.demonstracao){ const {error:de}=await sb.from('salas_demonstracao').update({sessao_atual_encerrada_em:fim.toISOString(),updated_at:fim.toISOString()}).eq('id',ev.id); if(de) throw de; }
   const {error:se}=await sb.from('sessoes_avaliacao').upsert({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,encerrada_em:fim.toISOString(),avaliacao_expira_em:expira.toISOString(),avaliacao_ativa:cfg.ativa!==false},{onConflict:'evento_id'}); if(se) throw se;
   let elegiveis=0;
   if(cfg.ativa!==false){
