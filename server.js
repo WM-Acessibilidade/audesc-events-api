@@ -3135,6 +3135,55 @@ async function obterConfigDemonstracoes(){
   const {data,error}=await getSupabase().from('configuracao_demonstracoes').select('*').eq('id',1).maybeSingle(); if(error) throw error;
   return data||{id:1,habilitada:false,validade_meses:1,limite_ouvintes:5,duracao_sessao_minutos:30,limite_sessoes:3,limite_geral_pedidos:100,limite_pedidos_email:1,apenas_uma_ativa_email:true,pedidos_utilizados:0};
 }
+
+function emailDemonstracaoValido(valor){
+  const e=String(valor||'').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) ? e : '';
+}
+async function obterContadorDemonstracaoEmail(sb,email){
+  const {data,error}=await sb.from('demonstracao_contadores_email').select('*').eq('email',email).maybeSingle();
+  if(error) throw error;
+  return data||{email,pedidos_utilizados:0,ultimo_pedido_em:null};
+}
+async function obterDemonstracaoAtivaEmail(sb,email){
+  const agora=new Date().toISOString();
+  const {data,error}=await sb.from('salas_demonstracao').select('*').eq('email',email).eq('ativa',true).eq('bloqueada',false).gt('expira_em',agora).order('criada_em',{ascending:false}).limit(1);
+  if(error) throw error;
+  return data&&data[0]||null;
+}
+async function validarDisponibilidadeDemonstracao(email,{considerarAtiva=true}={}){
+  const sb=getSupabase(), cfg=await obterConfigDemonstracoes();
+  if(cfg.habilitada!==true) throw Object.assign(new Error('As demonstrações estão temporariamente indisponíveis.'),{statusCode:403});
+  const contador=await obterContadorDemonstracaoEmail(sb,email);
+  let ativa=null;
+  if(considerarAtiva && cfg.apenas_uma_ativa_email!==false){
+    ativa=await obterDemonstracaoAtivaEmail(sb,email);
+    // Uma sala já ativa pode ser recuperada por nova validação sem consumir outro pedido,
+    // mesmo que o e-mail já tenha atingido o limite de novas demonstrações.
+    if(ativa) return {cfg,contador,ativa};
+  }
+  if(Number(cfg.pedidos_utilizados||0)>=Number(cfg.limite_geral_pedidos||0)) throw Object.assign(new Error('O limite geral de pedidos de demonstração foi atingido.'),{statusCode:429});
+  if(Number(contador.pedidos_utilizados||0)>=Number(cfg.limite_pedidos_email||0)) throw Object.assign(new Error('Este e-mail atingiu o número máximo de pedidos de demonstração permitido.'),{statusCode:429});
+  return {cfg,contador,ativa:null};
+}
+async function criarSalaDemonstracaoSolicitacao({email,nome=null,solicitacaoId=null}){
+  const sb=getSupabase();
+  const disp=await validarDisponibilidadeDemonstracao(email,{considerarAtiva:true});
+  if(disp.ativa) return {demonstracao:disp.ativa,reutilizada:true};
+  const cfg=disp.cfg, agora=new Date(), expira=new Date(agora);
+  expira.setMonth(expira.getMonth()+Number(cfg.validade_meses||1));
+  const sala=await gerarSalaUnica(sb), senha=await gerarSenhaUnica(sb);
+  const payload={nome:limit(nome,120)||null,email,sala_codigo:sala,senha_transmissor:senha,origem:'solicitacao',criada_em:agora.toISOString(),expira_em:expira.toISOString(),limite_ouvintes:cfg.limite_ouvintes,duracao_sessao_minutos:cfg.duracao_sessao_minutos,limite_sessoes:cfg.limite_sessoes,sessoes_utilizadas:0,ativa:true,bloqueada:false,updated_at:agora.toISOString()};
+  const {data,error}=await sb.from('salas_demonstracao').insert(payload).select().single(); if(error) throw error;
+  await sb.from('demonstracao_contadores_email').upsert({email,pedidos_utilizados:Number(disp.contador.pedidos_utilizados||0)+1,ultimo_pedido_em:agora.toISOString(),updated_at:agora.toISOString()});
+  await sb.from('configuracao_demonstracoes').update({pedidos_utilizados:Number(cfg.pedidos_utilizados||0)+1,updated_at:agora.toISOString()}).eq('id',1);
+  if(solicitacaoId){
+    const {error:ue}=await sb.from('solicitacoes_demonstracao').update({status:'concluida',sala_demonstracao_id:data.id,validada_em:agora.toISOString(),updated_at:agora.toISOString()}).eq('id',solicitacaoId);
+    if(ue) throw ue;
+  }
+  return {demonstracao:data,reutilizada:false};
+}
+
 app.get('/admin/demonstracoes/configuracao',async(req,res)=>{if(!admin(req,res))return;try{res.json({ok:true,config:await obterConfigDemonstracoes()})}catch(e){res.status(500).json({error:e.message})}});
 app.put('/admin/demonstracoes/configuracao',async(req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},a=await obterConfigDemonstracoes(),payload={id:1,habilitada:b.habilitada===true,validade_meses:Math.max(1,Math.min(12,Number(b.validade_meses||1))),limite_ouvintes:Math.max(1,Math.min(20,Number(b.limite_ouvintes||5))),duracao_sessao_minutos:Math.max(20,Math.min(120,Number(b.duracao_sessao_minutos||30))),limite_sessoes:Math.max(1,Math.min(10,Number(b.limite_sessoes||3))),limite_geral_pedidos:Math.max(1,Math.min(1000,Number(b.limite_geral_pedidos||100))),limite_pedidos_email:Math.max(1,Math.min(10,Number(b.limite_pedidos_email||1))),apenas_uma_ativa_email:b.apenas_uma_ativa_email!==false,pedidos_utilizados:Number(a.pedidos_utilizados||0),updated_at:new Date().toISOString()};const {data,error}=await getSupabase().from('configuracao_demonstracoes').upsert(payload).select().single();if(error)throw error;res.json({ok:true,config:data})}catch(e){res.status(500).json({error:e.message})}});
 app.post('/admin/demonstracoes/zerar-contador-geral',async(req,res)=>{if(!admin(req,res))return;try{const {error}=await getSupabase().from('configuracao_demonstracoes').update({pedidos_utilizados:0,updated_at:new Date().toISOString()}).eq('id',1);if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:e.message})}});
@@ -3145,6 +3194,62 @@ app.post('/admin/demonstracoes',async(req,res)=>{if(!admin(req,res))return;try{c
 app.patch('/admin/demonstracoes/:id',async(req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},patch={updated_at:new Date().toISOString()};if('bloqueada'in b)patch.bloqueada=!!b.bloqueada;if('ativa'in b)patch.ativa=!!b.ativa;if(b.renovar_meses){const {data:at,error:ae}=await getSupabase().from('salas_demonstracao').select('*').eq('id',req.params.id).single();if(ae)throw ae;const base=new Date(at.expira_em)>new Date()?new Date(at.expira_em):new Date();base.setMonth(base.getMonth()+Math.max(1,Math.min(12,Number(b.renovar_meses))));patch.expira_em=base.toISOString();}const {data,error}=await getSupabase().from('salas_demonstracao').update(patch).eq('id',req.params.id).select().single();if(error)throw error;res.json({ok:true,demonstracao:data})}catch(e){res.status(500).json({error:e.message})}});
 app.delete('/admin/demonstracoes/:id',async(req,res)=>{if(!admin(req,res))return;try{const {error}=await getSupabase().from('salas_demonstracao').delete().eq('id',req.params.id);if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:e.message})}});
 app.get('/public/demonstracoes/configuracao',async(req,res)=>{try{const c=await obterConfigDemonstracoes();res.json({ok:true,habilitada:c.habilitada===true})}catch(e){res.status(500).json({error:e.message})}});
+
+app.post('/public/demonstracoes/solicitar-link',async(req,res)=>{
+ try{
+  const email=emailDemonstracaoValido(req.body&&req.body.email);
+  if(!email) return res.status(400).json({error:'Informe um e-mail válido.'});
+  const sb=getSupabase();
+  const disp=await validarDisponibilidadeDemonstracao(email,{considerarAtiva:true});
+  // Mesmo quando já existe uma sala ativa, criamos/reutilizamos uma solicitação de validação.
+  // Após o e-mail ser confirmado, essa solicitação será associada à sala existente sem consumir novo pedido.
+  // Reutiliza solicitação pendente recente para evitar que vários cliques gerem vários registros.
+  const quinzeMin=new Date(Date.now()-15*60*1000).toISOString();
+  const pend=await sb.from('solicitacoes_demonstracao').select('*').eq('email',email).eq('status','pendente').gte('criada_em',quinzeMin).order('criada_em',{ascending:false}).limit(1);
+  if(pend.error) throw pend.error;
+  let pedido=pend.data&&pend.data[0];
+  if(!pedido){
+    const ins=await sb.from('solicitacoes_demonstracao').insert({email,status:'pendente',criada_em:new Date().toISOString(),updated_at:new Date().toISOString()}).select().single();
+    if(ins.error) throw ins.error; pedido=ins.data;
+  }
+  res.json({ok:true,pedido_id:pedido.id,mensagem:'Solicitação registrada. Envie o link de validação para continuar.'});
+ }catch(e){res.status(e.statusCode||500).json({error:e.message||'Não foi possível solicitar a demonstração.'})}
+});
+
+app.post('/demonstracoes/ativar',async(req,res)=>{
+ try{
+  const user=await getUser(req); if(!user||!user.email) return res.status(401).json({error:'E-mail não autenticado. Abra novamente o link de validação.'});
+  const email=String(user.email).trim().toLowerCase(), pedidoId=String((req.body||{}).pedido_id||'').trim();
+  if(!pedidoId) return res.status(400).json({error:'Solicitação de demonstração não identificada.'});
+  const sb=getSupabase();
+  const {data:pedido,error}=await sb.from('solicitacoes_demonstracao').select('*').eq('id',pedidoId).single(); if(error) throw error;
+  if(!pedido || String(pedido.email||'').toLowerCase()!==email) return res.status(403).json({error:'Este link de validação não corresponde ao e-mail autenticado.'});
+  if(pedido.status==='concluida' && pedido.sala_demonstracao_id){
+    const r=await sb.from('salas_demonstracao').select('*').eq('id',pedido.sala_demonstracao_id).single(); if(r.error) throw r.error;
+    return res.json({ok:true,demonstracao:r.data,reutilizada:true});
+  }
+  if(pedido.status!=='pendente') return res.status(410).json({error:'Esta solicitação não está mais disponível.'});
+  const disp=await validarDisponibilidadeDemonstracao(email,{considerarAtiva:true});
+  if(disp.ativa && disp.cfg.apenas_uma_ativa_email!==false){
+    const agora=new Date().toISOString();
+    const up=await sb.from('solicitacoes_demonstracao').update({status:'concluida',sala_demonstracao_id:disp.ativa.id,validada_em:agora,updated_at:agora}).eq('id',pedido.id); if(up.error) throw up.error;
+    return res.json({ok:true,demonstracao:disp.ativa,reutilizada:true});
+  }
+  const out=await criarSalaDemonstracaoSolicitacao({email,solicitacaoId:pedido.id});
+  res.json({ok:true,...out});
+ }catch(e){console.error(e);res.status(e.statusCode||500).json({error:e.message||'Não foi possível ativar a demonstração.'})}
+});
+
+app.get('/demonstracoes/minha/:pedidoId',async(req,res)=>{
+ try{
+  const user=await getUser(req); if(!user||!user.email) return res.status(401).json({error:'E-mail não autenticado.'});
+  const email=String(user.email).trim().toLowerCase(), sb=getSupabase();
+  const {data:pedido,error}=await sb.from('solicitacoes_demonstracao').select('*').eq('id',req.params.pedidoId).single(); if(error) throw error;
+  if(!pedido || String(pedido.email||'').toLowerCase()!==email || !pedido.sala_demonstracao_id) return res.status(404).json({error:'Demonstração não encontrada para esta solicitação.'});
+  const r=await sb.from('salas_demonstracao').select('*').eq('id',pedido.sala_demonstracao_id).single(); if(r.error) throw r.error;
+  res.json({ok:true,demonstracao:r.data});
+ }catch(e){res.status(500).json({error:e.message||'Não foi possível consultar a demonstração.'})}
+});
 
 
 
