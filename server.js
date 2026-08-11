@@ -1086,9 +1086,33 @@ async function buscarEventoOuPlanilhaPorSala(sb, sala, campos, opts){
   if(demo) return demo;
   return await buscarSalaNaPlanilha(sala, opts && opts.password);
 }
+async function encerrarHistoricoSessaoDemonstracao(sb, salaId, numeroSessao, encerradaEm, motivo){
+  if(!salaId || !numeroSessao) return;
+  const fim = encerradaEm instanceof Date ? encerradaEm : new Date(encerradaEm || Date.now());
+  const {data:hist,error:he}=await sb.from('sessoes_demonstracao').select('*').eq('sala_demonstracao_id',salaId).eq('numero_sessao',numeroSessao).maybeSingle();
+  if(he) throw he;
+  if(!hist || hist.status==='encerrada') return;
+  const inicio=new Date(hist.iniciada_em);
+  const minutos=Math.max(0,(fim.getTime()-inicio.getTime())/60000);
+  const {error}=await sb.from('sessoes_demonstracao').update({encerrada_em:fim.toISOString(),duracao_efetiva_minutos:Number(minutos.toFixed(2)),motivo_encerramento:motivo||'encerrada',status:'encerrada',updated_at:fim.toISOString()}).eq('id',hist.id);
+  if(error) throw error;
+}
+
+async function reconciliarSessaoDemonstracaoExpirada(sb,d){
+  if(!d || !d.id || !d.sessao_atual_iniciada_em || d.sessao_atual_encerrada_em) return d;
+  const inicio=new Date(d.sessao_atual_iniciada_em);
+  const previsto=new Date(inicio.getTime()+Number(d.duracao_sessao_minutos||0)*60000);
+  if(previsto>new Date()) return d;
+  const numero=Number(d.sessoes_utilizadas||0);
+  await encerrarHistoricoSessaoDemonstracao(sb,d.id,numero,previsto,'limite_tempo');
+  const {data,error}=await sb.from('salas_demonstracao').update({sessao_atual_encerrada_em:previsto.toISOString(),updated_at:new Date().toISOString()}).eq('id',d.id).select('*').single();
+  if(error) throw error;
+  return data;
+}
+
 async function iniciarSessaoDemonstracao(sb, ev){
   if(!ev||ev.tipo_sala!=='demonstracao'||!ev.demonstracao) return ev;
-  let d=ev.demonstracao; const agora=new Date();
+  let d=await reconciliarSessaoDemonstracaoExpirada(sb,ev.demonstracao); const agora=new Date();
   if(!d.ativa||d.bloqueada) throw new Error('Esta sala de demonstração está bloqueada ou inativa.');
   if(new Date(d.expira_em)<=agora) throw new Error('A validade desta sala de demonstração terminou.');
   const inicio=d.sessao_atual_iniciada_em?new Date(d.sessao_atual_iniciada_em):null;
@@ -1097,8 +1121,12 @@ async function iniciarSessaoDemonstracao(sb, ev){
   if(!sessaoAtiva){
     if(Number(d.sessoes_utilizadas||0)>=Number(d.limite_sessoes||0)) throw new Error('O número máximo de sessões desta demonstração foi atingido.');
     const novoInicio=agora.toISOString();
-    const {data,error}=await sb.from('salas_demonstracao').update({sessoes_utilizadas:Number(d.sessoes_utilizadas||0)+1,sessao_atual_iniciada_em:novoInicio,sessao_atual_encerrada_em:null,updated_at:novoInicio}).eq('id',d.id).select('*').single();
+    const novoNumero=Number(d.sessoes_utilizadas||0)+1;
+    const novoFimPrevisto=new Date(agora.getTime()+Number(d.duracao_sessao_minutos||0)*60000).toISOString();
+    const {data,error}=await sb.from('salas_demonstracao').update({sessoes_utilizadas:novoNumero,sessao_atual_iniciada_em:novoInicio,sessao_atual_encerrada_em:null,updated_at:novoInicio}).eq('id',d.id).select('*').single();
     if(error) throw error; d=data;
+    const {error:histError}=await sb.from('sessoes_demonstracao').upsert({sala_demonstracao_id:d.id,numero_sessao:novoNumero,iniciada_em:novoInicio,encerramento_previsto_em:novoFimPrevisto,status:'em_andamento',updated_at:novoInicio},{onConflict:'sala_demonstracao_id,numero_sessao'});
+    if(histError) throw histError;
   }
   ev.demonstracao=d; ev.data_evento=d.sessao_atual_iniciada_em; ev.duracao_horas=Number(d.duracao_sessao_minutos||0)/60; ev.max_ouvintes=d.limite_ouvintes; return ev;
 }
@@ -3189,9 +3217,37 @@ app.put('/admin/demonstracoes/configuracao',async(req,res)=>{if(!admin(req,res))
 app.post('/admin/demonstracoes/zerar-contador-geral',async(req,res)=>{if(!admin(req,res))return;try{const {error}=await getSupabase().from('configuracao_demonstracoes').update({pedidos_utilizados:0,updated_at:new Date().toISOString()}).eq('id',1);if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:e.message})}});
 app.post('/admin/demonstracoes/zerar-contador-email',async(req,res)=>{if(!admin(req,res))return;try{const email=String((req.body||{}).email||'').trim().toLowerCase();if(!email)return res.status(400).json({error:'Informe o e-mail.'});const {error}=await getSupabase().from('demonstracao_contadores_email').upsert({email,pedidos_utilizados:0,updated_at:new Date().toISOString()});if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:e.message})}});
 app.get('/admin/demonstracoes/email-contador',async(req,res)=>{if(!admin(req,res))return;try{const email=String(req.query.email||'').trim().toLowerCase();const {data,error}=await getSupabase().from('demonstracao_contadores_email').select('*').eq('email',email).maybeSingle();if(error)throw error;res.json({ok:true,contador:data||{email,pedidos_utilizados:0,ultimo_pedido_em:null}})}catch(e){res.status(500).json({error:e.message})}});
-app.get('/admin/demonstracoes',async(req,res)=>{if(!admin(req,res))return;try{const q=String(req.query.q||'').trim().replace(/[%_,]/g,'');let query=getSupabase().from('salas_demonstracao').select('*').order('criada_em',{ascending:false}).limit(500);if(q)query=query.or(`email.ilike.%${q}%,sala_codigo.ilike.%${q}%`);const {data,error}=await query;if(error)throw error;res.json({ok:true,demonstracoes:data||[]})}catch(e){res.status(500).json({error:e.message})}});
+async function prepararDetalhesDemonstracao(sb,id){
+  const {data:d,error}=await sb.from('salas_demonstracao').select('*').eq('id',id).single();
+  if(error) throw error;
+  const demo=await reconciliarSessaoDemonstracaoExpirada(sb,d);
+  const {data:sessoes,error:se}=await sb.from('sessoes_demonstracao').select('*').eq('sala_demonstracao_id',id).order('numero_sessao',{ascending:false});
+  if(se) throw se;
+  return {demonstracao:demo,sessoes:sessoes||[]};
+}
+function linkAudesc(rel){ return String(AUDESC_SITE_URL||'').replace(/\/+$/,'/')+String(rel||'').replace(/^\/+/, ''); }
+async function enviarEmailDemonstracao(d){
+  const receptor=linkAudesc('live/receber.html?sala='+encodeURIComponent(d.sala_codigo));
+  const transmissor=linkAudesc('live/transmitir.html');
+  const assunto='Dados da sua Sala de Demonstração Audesc';
+  const texto=[
+    'Sala de Demonstração Audesc','',
+    'Código: '+d.sala_codigo,
+    'Senha do transmissor: '+d.senha_transmissor,
+    'Validade: '+new Date(d.expira_em).toLocaleString('pt-BR'),
+    'Sessões: '+Number(d.sessoes_utilizadas||0)+' de '+Number(d.limite_sessoes||0)+' utilizadas',
+    'Limite de ouvintes: '+d.limite_ouvintes,
+    'Duração máxima por sessão: '+d.duracao_sessao_minutos+' minutos','',
+    'Página do transmissor: '+transmissor,
+    'Link para ouvintes: '+receptor
+  ].join('\n');
+  return await enviarEmailResend({to:d.email,subject:assunto,text:texto});
+}
+app.get('/admin/demonstracoes',async(req,res)=>{if(!admin(req,res))return;try{const q=String(req.query.q||'').trim().replace(/[%_,]/g,'');let query=getSupabase().from('salas_demonstracao').select('*').order('criada_em',{ascending:false}).limit(500);if(q)query=query.or(`email.ilike.%${q}%,sala_codigo.ilike.%${q}%`);const {data,error}=await query;if(error)throw error;const sb=getSupabase();const out=[];for(const d of (data||[]))out.push(await reconciliarSessaoDemonstracaoExpirada(sb,d));res.json({ok:true,demonstracoes:out})}catch(e){res.status(500).json({error:e.message})}});
+app.get('/admin/demonstracoes/:id',async(req,res)=>{if(!admin(req,res))return;try{res.json({ok:true,...await prepararDetalhesDemonstracao(getSupabase(),req.params.id)})}catch(e){res.status(500).json({error:e.message})}});
 app.post('/admin/demonstracoes',async(req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},email=String(b.email||'').trim().toLowerCase();if(!email||!email.includes('@'))return res.status(400).json({error:'Informe um e-mail válido.'});const cfg=await obterConfigDemonstracoes(),sb=getSupabase(),sala=await gerarSalaUnica(sb),senha=await gerarSenhaUnica(sb),agora=new Date(),expira=new Date(agora);expira.setMonth(expira.getMonth()+Number(cfg.validade_meses||1));const payload={nome:limit(b.nome,120)||null,email,sala_codigo:sala,senha_transmissor:senha,origem:'manual',criada_em:agora.toISOString(),expira_em:expira.toISOString(),limite_ouvintes:cfg.limite_ouvintes,duracao_sessao_minutos:cfg.duracao_sessao_minutos,limite_sessoes:cfg.limite_sessoes,sessoes_utilizadas:0,ativa:true,bloqueada:false,updated_at:agora.toISOString()};const {data,error}=await sb.from('salas_demonstracao').insert(payload).select().single();if(error)throw error;const {data:c}=await sb.from('demonstracao_contadores_email').select('*').eq('email',email).maybeSingle();await sb.from('demonstracao_contadores_email').upsert({email,pedidos_utilizados:Number(c&&c.pedidos_utilizados||0)+1,ultimo_pedido_em:agora.toISOString(),updated_at:agora.toISOString()});await sb.from('configuracao_demonstracoes').update({pedidos_utilizados:Number(cfg.pedidos_utilizados||0)+1,updated_at:agora.toISOString()}).eq('id',1);res.json({ok:true,demonstracao:data})}catch(e){res.status(500).json({error:e.message})}});
-app.patch('/admin/demonstracoes/:id',async(req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},patch={updated_at:new Date().toISOString()};if('bloqueada'in b)patch.bloqueada=!!b.bloqueada;if('ativa'in b)patch.ativa=!!b.ativa;if(b.renovar_meses){const {data:at,error:ae}=await getSupabase().from('salas_demonstracao').select('*').eq('id',req.params.id).single();if(ae)throw ae;const base=new Date(at.expira_em)>new Date()?new Date(at.expira_em):new Date();base.setMonth(base.getMonth()+Math.max(1,Math.min(12,Number(b.renovar_meses))));patch.expira_em=base.toISOString();}const {data,error}=await getSupabase().from('salas_demonstracao').update(patch).eq('id',req.params.id).select().single();if(error)throw error;res.json({ok:true,demonstracao:data})}catch(e){res.status(500).json({error:e.message})}});
+app.patch('/admin/demonstracoes/:id',async(req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},sb=getSupabase(),patch={updated_at:new Date().toISOString()};const {data:at,error:ae}=await sb.from('salas_demonstracao').select('*').eq('id',req.params.id).single();if(ae)throw ae;const atual=await reconciliarSessaoDemonstracaoExpirada(sb,at);if('bloqueada'in b)patch.bloqueada=!!b.bloqueada;if('ativa'in b)patch.ativa=!!b.ativa;if('limite_ouvintes'in b)patch.limite_ouvintes=Math.max(1,Math.min(20,Number(b.limite_ouvintes)));if('duracao_sessao_minutos'in b){const inicioAtual=atual.sessao_atual_iniciada_em?new Date(atual.sessao_atual_iniciada_em):null;const fimAtual=inicioAtual?new Date(inicioAtual.getTime()+Number(atual.duracao_sessao_minutos||0)*60000):null;const ativaAgora=!!(inicioAtual&&!atual.sessao_atual_encerrada_em&&fimAtual>new Date());if(ativaAgora)return res.status(409).json({error:'A duração da sessão não pode ser alterada enquanto uma transmissão estiver em andamento.'});patch.duracao_sessao_minutos=Math.max(20,Math.min(120,Number(b.duracao_sessao_minutos)));}if('limite_sessoes'in b){const novo=Math.max(1,Math.min(10,Number(b.limite_sessoes)));if(novo<Number(atual.sessoes_utilizadas||0))return res.status(400).json({error:'O limite de sessões não pode ser menor que o número de sessões já utilizadas.'});patch.limite_sessoes=novo;}if(b.renovar_meses){const base=new Date(atual.expira_em)>new Date()?new Date(atual.expira_em):new Date();base.setMonth(base.getMonth()+Math.max(1,Math.min(12,Number(b.renovar_meses))));patch.expira_em=base.toISOString();}const {data,error}=await sb.from('salas_demonstracao').update(patch).eq('id',req.params.id).select().single();if(error)throw error;res.json({ok:true,demonstracao:data})}catch(e){res.status(500).json({error:e.message})}});
+app.post('/admin/demonstracoes/:id/reenviar-email',async(req,res)=>{if(!admin(req,res))return;try{const {demonstracao}=await prepararDetalhesDemonstracao(getSupabase(),req.params.id);const resultado=await enviarEmailDemonstracao(demonstracao);if(!resultado.ok)return res.status(502).json({error:'Não foi possível enviar o e-mail da demonstração.',resultado});res.json({ok:true,resultado})}catch(e){res.status(500).json({error:e.message})}});
 app.delete('/admin/demonstracoes/:id',async(req,res)=>{if(!admin(req,res))return;try{const {error}=await getSupabase().from('salas_demonstracao').delete().eq('id',req.params.id);if(error)throw error;res.json({ok:true})}catch(e){res.status(500).json({error:e.message})}});
 app.get('/public/demonstracoes/configuracao',async(req,res)=>{try{const c=await obterConfigDemonstracoes();res.json({ok:true,habilitada:c.habilitada===true})}catch(e){res.status(500).json({error:e.message})}});
 
@@ -3528,7 +3584,7 @@ app.post('/salas/:sala/encerrar-transmissao', async (req,res)=>{
   if(!senhaAdminValida(senha) && senha!==String(ev.senha_transmissor||'')) return res.status(403).json({error:'Senha do transmissor invalida.'});
   const cfg=await obterConfigAvaliacao(), fim=new Date(), expira=new Date(fim.getTime()+Math.max(15,Number(cfg.prazo_minutos||60))*60000);
   const sb=getSupabase();
-  if(ev.tipo_sala==='demonstracao' && ev.demonstracao){ const {error:de}=await sb.from('salas_demonstracao').update({sessao_atual_encerrada_em:fim.toISOString(),updated_at:fim.toISOString()}).eq('id',ev.id); if(de) throw de; }
+  if(ev.tipo_sala==='demonstracao' && ev.demonstracao){ const numeroSessao=Number(ev.demonstracao.sessoes_utilizadas||0); await encerrarHistoricoSessaoDemonstracao(sb,ev.id,numeroSessao,fim,'encerrada_pelo_transmissor'); const {error:de}=await sb.from('salas_demonstracao').update({sessao_atual_encerrada_em:fim.toISOString(),updated_at:fim.toISOString()}).eq('id',ev.id); if(de) throw de; }
   const {error:se}=await sb.from('sessoes_avaliacao').upsert({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,encerrada_em:fim.toISOString(),avaliacao_expira_em:expira.toISOString(),avaliacao_ativa:cfg.ativa!==false},{onConflict:'evento_id'}); if(se) throw se;
   let elegiveis=0;
   if(cfg.ativa!==false){
