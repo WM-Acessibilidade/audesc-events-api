@@ -3547,6 +3547,9 @@ async function obterConfigAvaliacao(){
   }catch(e){ return Object.assign({},AVALIACAO_PADRAO); }
 }
 function idOuvinteValido(v){ return /^[a-zA-Z0-9_-]{16,100}$/.test(String(v||'')); }
+function chaveOuvinteAvaliacao(ouvinteId,ciclo){
+  return 'av_'+crypto.createHash('sha256').update(String(ouvinteId||'')+'|'+String(ciclo||'')).digest('hex').slice(0,48);
+}
 
 app.post('/public/salas/:sala/participacao', async (req,res)=>{
  try{
@@ -3590,7 +3593,8 @@ app.post('/salas/:sala/encerrar-transmissao', async (req,res)=>{
   if(cfg.ativa!==false){
     const {data:parts,error:pe}=await sb.from('participacoes_transmissoes').select('*').eq('evento_id',ev.id).lte('primeira_entrada',fim.toISOString()); if(pe) throw pe;
     const minMs=Math.max(0,Number(cfg.participacao_minima_minutos||1))*60000;
-    const rows=(parts||[]).filter(p=> Math.max(0,fim.getTime()-new Date(p.primeira_entrada).getTime())>=minMs).map(p=>({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,ouvinte_id:p.ouvinte_id,elegivel:true,definido_em:fim.toISOString(),expira_em:expira.toISOString()}));
+    const ciclo=fim.toISOString();
+    const rows=(parts||[]).filter(p=> Math.max(0,fim.getTime()-new Date(p.primeira_entrada).getTime())>=minMs).map(p=>({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,ouvinte_id:chaveOuvinteAvaliacao(p.ouvinte_id,ciclo),elegivel:true,definido_em:ciclo,expira_em:expira.toISOString()}));
     if(rows.length){ const {error:ee}=await sb.from('elegibilidade_avaliacoes').upsert(rows,{onConflict:'evento_id,ouvinte_id'}); if(ee) throw ee; elegiveis=rows.length; }
   }
   res.json({ok:true,avaliacao_ativa:cfg.ativa!==false,elegiveis,encerrada_em:fim.toISOString(),expira_em:expira.toISOString(),prazo_minutos:Number(cfg.prazo_minutos||60)});
@@ -3639,12 +3643,14 @@ app.post('/public/salas/:sala/encerramento-automatico', async (req,res)=>{
       const {data:parts,error:pe}=await sb.from('participacoes_transmissoes').select('*').eq('evento_id',ev.id).lte('primeira_entrada',fim.toISOString());
       if(pe) throw pe;
       const minMs=Math.max(0,Number(cfg.participacao_minima_minutos||1))*60000;
-      const rows=(parts||[]).filter(p=>Math.max(0,fim.getTime()-new Date(p.primeira_entrada).getTime())>=minMs).map(p=>({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,ouvinte_id:p.ouvinte_id,elegivel:true,definido_em:fim.toISOString(),expira_em:expira.toISOString()}));
+      const ciclo=fim.toISOString();
+      const rows=(parts||[]).filter(p=>Math.max(0,fim.getTime()-new Date(p.primeira_entrada).getTime())>=minMs).map(p=>({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,ouvinte_id:chaveOuvinteAvaliacao(p.ouvinte_id,ciclo),elegivel:true,definido_em:ciclo,expira_em:expira.toISOString()}));
       if(rows.length){const {error:ee}=await sb.from('elegibilidade_avaliacoes').upsert(rows,{onConflict:'evento_id,ouvinte_id'});if(ee)throw ee;}
     }
   }
 
-  const {data:elegibilidade,error:elegErro}=await sb.from('elegibilidade_avaliacoes').select('*').eq('evento_id',ev.id).eq('ouvinte_id',ouvinte_id).maybeSingle();
+  const chaveAvaliacao=chaveOuvinteAvaliacao(ouvinte_id,fim.toISOString());
+  const {data:elegibilidade,error:elegErro}=await sb.from('elegibilidade_avaliacoes').select('*').eq('evento_id',ev.id).eq('ouvinte_id',chaveAvaliacao).maybeSingle();
   if(elegErro) throw elegErro;
   res.json({ok:true,encerrada:true,avaliacao_ativa:cfg.ativa!==false,elegivel:!!(elegibilidade&&elegibilidade.elegivel),expira_em:expira.toISOString(),prazo_minutos:Number(cfg.prazo_minutos||60)});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao concluir o encerramento automático.'})}
@@ -3653,9 +3659,15 @@ app.post('/public/salas/:sala/encerramento-automatico', async (req,res)=>{
 app.get('/public/salas/:sala/avaliacao/status', async (req,res)=>{
  try{
   const sala=limit(req.params.sala,120), id=limit(req.query.ouvinte_id,100); if(!idOuvinteValido(id)) return res.status(400).json({error:'Identificacao invalida.'});
-  const sb=getSupabase(); const {data:el,error}=await sb.from('elegibilidade_avaliacoes').select('*').eq('sala_codigo',sala).eq('ouvinte_id',id).maybeSingle(); if(error) throw error;
-  if(!el) return res.json({ok:true,encerrada:false,elegivel:false,disponivel:false});
-  const expirou=new Date(el.expira_em).getTime()<Date.now(); const {data:av}=await sb.from('avaliacoes_transmissoes').select('*').eq('evento_id',el.evento_id).eq('ouvinte_id',id).maybeSingle();
+  const sb=getSupabase(), ev=await buscarEventoOuPlanilhaPorSala(sb,sala,'id,sala_codigo');
+  if(!ev) return res.status(404).json({error:'Sala nao encontrada.'});
+  const {data:sessao,error:sessaoErro}=await sb.from('sessoes_avaliacao').select('*').eq('evento_id',ev.id).maybeSingle(); if(sessaoErro) throw sessaoErro;
+  if(!sessao||sessao.avaliacao_ativa===false) return res.json({ok:true,encerrada:false,elegivel:false,disponivel:false});
+  const chave=chaveOuvinteAvaliacao(id,String(sessao.encerrada_em||''));
+  const {data:el,error}=await sb.from('elegibilidade_avaliacoes').select('*').eq('evento_id',ev.id).eq('ouvinte_id',chave).maybeSingle(); if(error) throw error;
+  if(!el) return res.json({ok:true,encerrada:true,elegivel:false,disponivel:false,expira_em:sessao.avaliacao_expira_em});
+  const expirou=new Date(el.expira_em).getTime()<Date.now();
+  const {data:av,error:avErro}=await sb.from('avaliacoes_transmissoes').select('*').eq('evento_id',el.evento_id).eq('ouvinte_id',chave).maybeSingle(); if(avErro) throw avErro;
   const respondida=!!av;
   res.json({ok:true,encerrada:true,elegivel:!!el.elegivel,disponivel:!!el.elegivel&&!expirou&&!respondida,expirou,respondida,expira_em:el.expira_em,avaliacao:av||null});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar avaliacao.'})}
@@ -3663,17 +3675,23 @@ app.get('/public/salas/:sala/avaliacao/status', async (req,res)=>{
 app.post('/public/salas/:sala/avaliacao', async (req,res)=>{
  try{
   const sala=limit(req.params.sala,120), b=req.body||{}, id=limit(b.ouvinte_id,100); if(!idOuvinteValido(id)) return res.status(400).json({error:'Identificacao invalida.'});
-  const sb=getSupabase(); const {data:el,error}=await sb.from('elegibilidade_avaliacoes').select('*').eq('sala_codigo',sala).eq('ouvinte_id',id).maybeSingle(); if(error) throw error;
+  const sb=getSupabase(), ev=await buscarEventoOuPlanilhaPorSala(sb,sala,'id,sala_codigo');
+  if(!ev) return res.status(404).json({error:'Sala nao encontrada.'});
+  const {data:sessao,error:sessaoErro}=await sb.from('sessoes_avaliacao').select('*').eq('evento_id',ev.id).maybeSingle(); if(sessaoErro) throw sessaoErro;
+  if(!sessao) return res.status(409).json({error:'Não há avaliação final disponível para esta transmissão.'});
+  const chave=chaveOuvinteAvaliacao(id,String(sessao.encerrada_em||''));
+  const {data:el,error}=await sb.from('elegibilidade_avaliacoes').select('*').eq('evento_id',ev.id).eq('ouvinte_id',chave).maybeSingle(); if(error) throw error;
   if(!el||!el.elegivel) return res.status(403).json({error:'Somente ouvintes presentes antes do encerramento podem avaliar.'});
   if(new Date(el.expira_em).getTime()<Date.now()) return res.status(410).json({error:'O periodo de avaliacao foi encerrado.'});
-  const {data:jaRespondida,error:jaErro}=await sb.from('avaliacoes_transmissoes').select('evento_id,ouvinte_id').eq('evento_id',el.evento_id).eq('ouvinte_id',id).maybeSingle();
+  const {data:jaRespondida,error:jaErro}=await sb.from('avaliacoes_transmissoes').select('evento_id,ouvinte_id').eq('evento_id',el.evento_id).eq('ouvinte_id',chave).maybeSingle();
   if(jaErro) throw jaErro;
   if(jaRespondida) return res.status(409).json({error:'Esta avaliação já foi enviada e não pode ser alterada.'});
   const geral=Number(b.avaliacao_geral), ad=Number(b.qualidade_audiodescricao), audio=Number(b.qualidade_audio), autonomia=Number(b.autonomia), rec=b.recomendacao===''||b.recomendacao==null?null:Number(b.recomendacao);
   if(![geral,ad,audio,autonomia].every(n=>Number.isInteger(n)&&n>=1&&n<=5)) return res.status(400).json({error:'Preencha todas as avaliacoes obrigatorias.'});
   if(rec!==null && (!Number.isInteger(rec)||rec<0||rec>10)) return res.status(400).json({error:'A recomendacao deve estar entre 0 e 10.'});
-  const payload={evento_id:el.evento_id,sala_codigo:sala,ouvinte_id:id,avaliacao_geral:geral,qualidade_audiodescricao:ad,qualidade_audio:audio,autonomia,recomendacao:rec,comentario:limit(b.comentario,1000),atualizada_em:new Date().toISOString()};
-  const {error:ae}=await sb.from('avaliacoes_transmissoes').upsert(payload,{onConflict:'evento_id,ouvinte_id'}); if(ae) throw ae; res.json({ok:true,mensagem:'Avaliacao registrada com sucesso.'});
+  const payload={evento_id:el.evento_id,sala_codigo:sala,ouvinte_id:chave,avaliacao_geral:geral,qualidade_audiodescricao:ad,qualidade_audio:audio,autonomia,recomendacao:rec,comentario:limit(b.comentario,1000),atualizada_em:new Date().toISOString()};
+  const {error:ae}=await sb.from('avaliacoes_transmissoes').upsert(payload,{onConflict:'evento_id,ouvinte_id'}); if(ae) throw ae;
+  res.json({ok:true,mensagem:'Avaliacao registrada com sucesso.'});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar avaliacao.'})}
 });
 app.get('/admin/avaliacoes/configuracao', async (req,res)=>{if(!admin(req,res))return;res.json({ok:true,config:await obterConfigAvaliacao()})});
