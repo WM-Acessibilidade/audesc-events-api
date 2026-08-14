@@ -3538,13 +3538,23 @@ app.get('/public/salas/:sala/janela-transmissao', async (req,res)=>{
 
 
 // Fase 6.13 - Avaliacao pos-transmissao
-const AVALIACAO_PADRAO = {ativa:true,prazo_minutos:60,participacao_minima_minutos:1,permitir_edicao:false,comentario_ativo:true};
+const ITENS_AVALIACAO_PADRAO = {
+  avaliacao_geral:{exibir:true,obrigatorio:true},
+  qualidade_audiodescricao:{exibir:true,obrigatorio:true},
+  qualidade_audio:{exibir:true,obrigatorio:true},
+  autonomia:{exibir:true,obrigatorio:true},
+  recomendacao:{exibir:true,obrigatorio:false},
+  comentario:{exibir:true,obrigatorio:false}
+};
+const AVALIACAO_PADRAO = {ativa:true,prazo_minutos:60,participacao_minima_minutos:1,permitir_edicao:false,comentario_ativo:true,itens_avaliacao:ITENS_AVALIACAO_PADRAO};
 async function obterConfigAvaliacao(){
   try{
     const {data,error}=await getSupabase().from('configuracao_avaliacoes').select('*').eq('id',1).maybeSingle();
     if(error) throw error;
-    return Object.assign({},AVALIACAO_PADRAO,data||{});
-  }catch(e){ return Object.assign({},AVALIACAO_PADRAO); }
+    const cfg=Object.assign({},AVALIACAO_PADRAO,data||{});
+    cfg.itens_avaliacao=Object.assign({},ITENS_AVALIACAO_PADRAO,(data&&data.itens_avaliacao)||{});
+    return cfg;
+  }catch(e){ return Object.assign({},AVALIACAO_PADRAO,{itens_avaliacao:Object.assign({},ITENS_AVALIACAO_PADRAO)}); }
 }
 function idOuvinteValido(v){ return /^[a-zA-Z0-9_-]{16,100}$/.test(String(v||'')); }
 function chaveOuvinteAvaliacao(ouvinteId,ciclo){
@@ -3589,6 +3599,7 @@ app.post('/salas/:sala/encerrar-transmissao', async (req,res)=>{
   if(!senhaAdminValida(senha) && senha!==String(ev.senha_transmissor||'')) return res.status(403).json({error:'Senha do transmissor invalida.'});
   const cfg=await obterConfigAvaliacao(), fim=new Date(), expira=new Date(fim.getTime()+Math.max(15,Number(cfg.prazo_minutos||60))*60000);
   const sb=getSupabase();
+  await sb.from('pedidos_avaliacao_audiodescricao').update({ativo:false}).eq('evento_id',ev.id).eq('ativo',true);
   if(ev.tipo_sala==='demonstracao' && ev.demonstracao){ const numeroSessao=Number(ev.demonstracao.sessoes_utilizadas||0); await encerrarHistoricoSessaoDemonstracao(sb,ev.id,numeroSessao,fim,'encerrada_pelo_transmissor'); const {error:de}=await sb.from('salas_demonstracao').update({sessao_atual_encerrada_em:fim.toISOString(),updated_at:fim.toISOString()}).eq('id',ev.id); if(de) throw de; }
   const {error:se}=await sb.from('sessoes_avaliacao').upsert({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,encerrada_em:fim.toISOString(),avaliacao_expira_em:expira.toISOString(),avaliacao_ativa:cfg.ativa!==false},{onConflict:'evento_id'}); if(se) throw se;
   let elegiveis=0;
@@ -3630,6 +3641,7 @@ app.post('/public/salas/:sala/encerramento-automatico', async (req,res)=>{
     if(Date.now()<fim.getTime()) return res.status(409).json({error:'A transmissão ainda está dentro da janela autorizada.'});
   }
 
+  await sb.from('pedidos_avaliacao_audiodescricao').update({ativo:false}).eq('evento_id',ev.id).eq('ativo',true);
   const cfg=await obterConfigAvaliacao();
   const {data:sessaoExistente,error:sessaoErro}=await sb.from('sessoes_avaliacao').select('*').eq('evento_id',ev.id).maybeSingle();
   if(sessaoErro) throw sessaoErro;
@@ -3688,22 +3700,61 @@ app.post('/public/salas/:sala/avaliacao', async (req,res)=>{
   const {data:jaRespondida,error:jaErro}=await sb.from('avaliacoes_transmissoes').select('evento_id,ouvinte_id').eq('evento_id',el.evento_id).eq('ouvinte_id',chave).maybeSingle();
   if(jaErro) throw jaErro;
   if(jaRespondida) return res.status(409).json({error:'Esta avaliação já foi enviada e não pode ser alterada.'});
-  const geral=Number(b.avaliacao_geral), ad=Number(b.qualidade_audiodescricao), audio=Number(b.qualidade_audio), autonomia=Number(b.autonomia), rec=b.recomendacao===''||b.recomendacao==null?null:Number(b.recomendacao);
-  if(![geral,ad,audio,autonomia].every(n=>Number.isInteger(n)&&n>=1&&n<=5)) return res.status(400).json({error:'Preencha todas as avaliacoes obrigatorias.'});
-  if(rec!==null && (!Number.isInteger(rec)||rec<0||rec>10)) return res.status(400).json({error:'A recomendacao deve estar entre 0 e 10.'});
-  const payload={evento_id:el.evento_id,sala_codigo:sala,ouvinte_id:chave,avaliacao_geral:geral,qualidade_audiodescricao:ad,qualidade_audio:audio,autonomia,recomendacao:rec,comentario:limit(b.comentario,1000),atualizada_em:new Date().toISOString()};
+  const cfg=await obterConfigAvaliacao(), itens=cfg.itens_avaliacao||ITENS_AVALIACAO_PADRAO;
+  const valor5=(chaveCampo)=>{
+    if(!itens[chaveCampo]?.exibir) return null;
+    const bruto=b[chaveCampo];
+    if((bruto===''||bruto==null) && !itens[chaveCampo]?.obrigatorio) return null;
+    const n=Number(bruto);
+    if(!Number.isInteger(n)||n<1||n>5) throw Object.assign(new Error('Preencha corretamente os itens obrigatórios da avaliação.'),{statusCode:400});
+    return n;
+  };
+  let geral,ad,audio,autonomia,rec=null,comentario='';
+  try{
+    geral=valor5('avaliacao_geral'); ad=valor5('qualidade_audiodescricao'); audio=valor5('qualidade_audio'); autonomia=valor5('autonomia');
+    if(itens.recomendacao?.exibir){
+      if((b.recomendacao===''||b.recomendacao==null) && itens.recomendacao.obrigatorio) throw Object.assign(new Error('Preencha a recomendação.'),{statusCode:400});
+      if(b.recomendacao!==''&&b.recomendacao!=null){rec=Number(b.recomendacao);if(!Number.isInteger(rec)||rec<0||rec>10)throw Object.assign(new Error('A recomendação deve estar entre 0 e 10.'),{statusCode:400});}
+    }
+    if(itens.comentario?.exibir){
+      comentario=limit(b.comentario,1000);
+      if(itens.comentario.obrigatorio && !comentario) throw Object.assign(new Error('Preencha o campo de comentários e sugestões.'),{statusCode:400});
+    }
+  }catch(validacao){return res.status(validacao.statusCode||400).json({error:validacao.message});}
+  const payload={evento_id:el.evento_id,sala_codigo:sala,ouvinte_id:chave,avaliacao_geral:geral,qualidade_audiodescricao:ad,qualidade_audio:audio,autonomia,recomendacao:rec,comentario,atualizada_em:new Date().toISOString()};
   const {error:ae}=await sb.from('avaliacoes_transmissoes').upsert(payload,{onConflict:'evento_id,ouvinte_id'}); if(ae) throw ae;
   res.json({ok:true,mensagem:'Avaliacao registrada com sucesso.'});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao salvar avaliacao.'})}
 });
 app.get('/admin/avaliacoes/configuracao', async (req,res)=>{if(!admin(req,res))return;res.json({ok:true,config:await obterConfigAvaliacao()})});
-app.put('/admin/avaliacoes/configuracao', async (req,res)=>{if(!admin(req,res))return;try{const b=req.body||{},payload={id:1,ativa:b.ativa!==false,prazo_minutos:Math.max(15,Math.min(120,Number(b.prazo_minutos||60))),participacao_minima_minutos:Math.max(0,Math.min(60,Number(b.participacao_minima_minutos||1))),permitir_edicao:false,comentario_ativo:b.comentario_ativo!==false,avaliacao_instantanea_ativa:b.avaliacao_instantanea_ativa!==false,comentario_instantaneo_ativo:b.comentario_instantaneo_ativo!==false,updated_at:new Date().toISOString()};const {error}=await getSupabase().from('configuracao_avaliacoes').upsert(payload);if(error)throw error;res.json({ok:true,config:payload})}catch(e){res.status(500).json({error:e.message})}});
+app.put('/admin/avaliacoes/configuracao', async (req,res)=>{
+ if(!admin(req,res))return;
+ try{
+  const b=req.body||{}, recebidos=b.itens_avaliacao||{}, itens={};
+  Object.keys(ITENS_AVALIACAO_PADRAO).forEach(chave=>{
+    const r=recebidos[chave]||{}, padrao=ITENS_AVALIACAO_PADRAO[chave];
+    itens[chave]={exibir:r.exibir!==false,obrigatorio:r.obrigatorio===true};
+    if(!itens[chave].exibir) itens[chave].obrigatorio=false;
+    if(r.exibir===undefined) itens[chave].exibir=padrao.exibir;
+    if(r.obrigatorio===undefined) itens[chave].obrigatorio=padrao.obrigatorio;
+  });
+  const payload={
+    id:1,ativa:b.ativa!==false,prazo_minutos:Math.max(15,Math.min(120,Number(b.prazo_minutos||60))),
+    participacao_minima_minutos:Math.max(0,Math.min(60,Number(b.participacao_minima_minutos||1))),
+    permitir_edicao:false,comentario_ativo:itens.comentario.exibir,
+    avaliacao_instantanea_ativa:b.avaliacao_instantanea_ativa!==false,
+    comentario_instantaneo_ativo:b.comentario_instantaneo_ativo!==false,
+    itens_avaliacao:itens,updated_at:new Date().toISOString()
+  };
+  const {error}=await getSupabase().from('configuracao_avaliacoes').upsert(payload);if(error)throw error;
+  res.json({ok:true,config:payload});
+ }catch(e){res.status(500).json({error:e.message})}
+});
 app.get('/admin/avaliacoes', async (req,res)=>{if(!admin(req,res))return;try{const {data,error}=await getSupabase().from('avaliacoes_transmissoes').select('*').order('atualizada_em',{ascending:false}).limit(1000);if(error)throw error;res.json({ok:true,avaliacoes:data||[]})}catch(e){res.status(500).json({error:e.message})}});
 
 
 
 // Fase 6.14 - Avaliacao instantanea da audiodescricao
-const AVALIACAO_INSTANTANEA_PRAZO_MINUTOS = 15;
 const AVALIACAO_INSTANTANEA_INTERVALO_MINUTOS = 15;
 async function avaliacaoInstantaneaAtiva(){
   try{
@@ -3714,9 +3765,16 @@ async function avaliacaoInstantaneaAtiva(){
 }
 app.get('/public/avaliacoes/configuracao', async (req,res)=>{
   try{
-    const cfg=await avaliacaoInstantaneaAtiva();
+    const cfgInstantanea=await avaliacaoInstantaneaAtiva();
+    const cfgFinal=await obterConfigAvaliacao();
     res.set('Cache-Control','no-store');
-    res.json({ok:true,avaliacao_instantanea_ativa:cfg.ativa,comentario_instantaneo_ativo:cfg.comentario});
+    res.json({
+      ok:true,
+      avaliacao_instantanea_ativa:cfgInstantanea.ativa,
+      comentario_instantaneo_ativo:cfgInstantanea.comentario,
+      avaliacao_final_ativa:cfgFinal.ativa!==false,
+      itens_avaliacao:cfgFinal.itens_avaliacao||ITENS_AVALIACAO_PADRAO
+    });
   }catch(e){
     res.status(500).json({error:e.message||'Erro ao consultar configuracao das avaliacoes.'});
   }
@@ -3731,13 +3789,16 @@ app.post('/salas/:sala/avaliacao-instantanea/pedidos', async (req,res)=>{
   const sb=getSupabase(), agora=new Date(), limiteAnterior=new Date(agora.getTime()-AVALIACAO_INSTANTANEA_INTERVALO_MINUTOS*60000).toISOString();
   const {data:ultimo,error:ue}=await sb.from('pedidos_avaliacao_audiodescricao').select('*').eq('evento_id',ev.id).gte('criado_em',limiteAnterior).order('criado_em',{ascending:false}).limit(1); if(ue) throw ue;
   if(ultimo&&ultimo.length){ const proximo=new Date(new Date(ultimo[0].criado_em).getTime()+AVALIACAO_INSTANTANEA_INTERVALO_MINUTOS*60000); return res.status(429).json({error:'Aguarde 15 minutos entre os pedidos.',proximo_pedido_em:proximo.toISOString()}); }
-  const expira=new Date(agora.getTime()+AVALIACAO_INSTANTANEA_PRAZO_MINUTOS*60000);
-  const {data:pedido,error:pe}=await sb.from('pedidos_avaliacao_audiodescricao').insert({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,solicitado_por:limit(b.solicitado_por,120),criado_em:agora.toISOString(),expira_em:expira.toISOString(),ativo:true}).select('*').single(); if(pe) throw pe;
+  // Um novo pedido encerra o ciclo anterior; o novo permanece disponível ao ouvinte
+  // até ser respondido, substituído por outro pedido ou a transmissão terminar.
+  await sb.from('pedidos_avaliacao_audiodescricao').update({ativo:false}).eq('evento_id',ev.id).eq('ativo',true);
+  const expiraBanco=new Date('2099-12-31T23:59:59.000Z');
+  const {data:pedido,error:pe}=await sb.from('pedidos_avaliacao_audiodescricao').insert({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,solicitado_por:limit(b.solicitado_por,120),criado_em:agora.toISOString(),expira_em:expiraBanco.toISOString(),ativo:true}).select('*').single(); if(pe) throw pe;
   const recente=new Date(agora.getTime()-90000).toISOString();
   const {data:parts,error:pae}=await sb.from('participacoes_transmissoes').select('ouvinte_id,nome_ouvinte,ultima_atividade').eq('evento_id',ev.id).gte('ultima_atividade',recente); if(pae) throw pae;
   const rows=(parts||[]).map(p=>({pedido_id:pedido.id,evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,ouvinte_id:p.ouvinte_id,nome_ouvinte:p.nome_ouvinte||'Ouvinte',elegivel:true,definido_em:agora.toISOString()}));
   if(rows.length){ const {error:ee}=await sb.from('elegibilidade_avaliacao_audiodescricao').insert(rows); if(ee) throw ee; }
-  res.json({ok:true,pedido_id:pedido.id,expira_em:expira.toISOString(),prazo_minutos:15,elegiveis:rows.length,comentario_ativo:cfg.comentario});
+  res.json({ok:true,pedido_id:pedido.id,expira_em:null,proximo_pedido_em:new Date(agora.getTime()+AVALIACAO_INSTANTANEA_INTERVALO_MINUTOS*60000).toISOString(),elegiveis:rows.length,comentario_ativo:cfg.comentario});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao criar pedido de avaliacao.'})}
 });
 
@@ -3757,7 +3818,7 @@ app.get('/salas/:sala/avaliacao-instantanea/estado-transmissor', async (req,res)
   const proximo=new Date(new Date(ultimo.criado_em).getTime()+AVALIACAO_INSTANTANEA_INTERVALO_MINUTOS*60000);
   const pode=proximo.getTime()<=Date.now();
   res.set('Cache-Control','no-store');
-  res.json({ok:true,ativa:true,pode_solicitar:pode,proximo_pedido_em:proximo.toISOString(),pedido_atual:{id:ultimo.id,expira_em:ultimo.expira_em,ativo:ultimo.ativo!==false}});
+  res.json({ok:true,ativa:true,pode_solicitar:pode,proximo_pedido_em:proximo.toISOString(),pedido_atual:{id:ultimo.id,expira_em:null,ativo:ultimo.ativo!==false}});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar estado da avaliacao instantanea.'})}
 });
 
@@ -3766,12 +3827,12 @@ app.get('/public/salas/:sala/avaliacao-instantanea/status', async (req,res)=>{
   const cfg=await avaliacaoInstantaneaAtiva();
   if(!cfg.ativa) return res.json({ok:true,ativa:false,disponivel:false});
   const sala=limit(req.params.sala,120), id=limit(req.query.ouvinte_id,100); if(!idOuvinteValido(id)) return res.status(400).json({error:'Identificacao invalida.'});
-  const sb=getSupabase(), agora=new Date().toISOString();
+  const sb=getSupabase();
   const {data:els,error}=await sb.from('elegibilidade_avaliacao_audiodescricao').select('*,pedidos_avaliacao_audiodescricao(*)').eq('sala_codigo',sala).eq('ouvinte_id',id).order('definido_em',{ascending:false}).limit(5); if(error) throw error;
   for(const el of (els||[])){
-    const p=el.pedidos_avaliacao_audiodescricao; if(!p||!p.ativo||p.expira_em<=agora) continue;
+    const p=el.pedidos_avaliacao_audiodescricao; if(!p||!p.ativo) continue;
     const {data:av}=await sb.from('avaliacoes_instantaneas_audiodescricao').select('id').eq('pedido_id',p.id).eq('ouvinte_id',id).maybeSingle();
-    if(!av) return res.json({ok:true,ativa:true,disponivel:true,pedido_id:p.id,expira_em:p.expira_em,mensagem:'Por gentileza, avalie a minha audiodescricao.'});
+    if(!av) return res.json({ok:true,ativa:true,disponivel:true,pedido_id:p.id,expira_em:null,mensagem:'Por gentileza, avalie a minha audiodescricao.'});
   }
   res.json({ok:true,ativa:true,disponivel:false});
  }catch(e){res.status(500).json({error:e.message||'Erro ao consultar pedido.'})}
@@ -3783,7 +3844,7 @@ app.post('/public/salas/:sala/avaliacao-instantanea', async (req,res)=>{
   const nota=Number(b.nota); if(!Number.isInteger(nota)||nota<1||nota>5) return res.status(400).json({error:'Selecione uma nota de 1 a 5.'});
   const sb=getSupabase(); const {data:el,error}=await sb.from('elegibilidade_avaliacao_audiodescricao').select('*,pedidos_avaliacao_audiodescricao(*)').eq('pedido_id',pedidoId).eq('ouvinte_id',id).maybeSingle(); if(error) throw error;
   if(!el||!el.elegivel||el.sala_codigo!==sala) return res.status(403).json({error:'Este ouvinte nao estava elegivel neste pedido.'});
-  const p=el.pedidos_avaliacao_audiodescricao; if(!p||!p.ativo||new Date(p.expira_em).getTime()<Date.now()) return res.status(410).json({error:'O prazo deste pedido foi encerrado.'});
+  const p=el.pedidos_avaliacao_audiodescricao; if(!p||!p.ativo) return res.status(410).json({error:'Este pedido de avaliação não está mais ativo.'});
   const payload={pedido_id:pedidoId,evento_id:el.evento_id,sala_codigo:sala,ouvinte_id:id,nome_ouvinte:el.nome_ouvinte||limit(b.nome_ouvinte,120)||'Ouvinte',nota,comentario:limit(b.comentario,500),criado_em:new Date().toISOString()};
   const {error:ie}=await sb.from('avaliacoes_instantaneas_audiodescricao').insert(payload); if(ie){ if(String(ie.code)==='23505') return res.status(409).json({error:'Voce ja respondeu a este pedido.'}); throw ie; }
   const {data:todas,error:te}=await sb.from('avaliacoes_instantaneas_audiodescricao').select('nota').eq('pedido_id',pedidoId); if(te) throw te;
