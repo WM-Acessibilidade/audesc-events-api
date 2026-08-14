@@ -3548,7 +3548,9 @@ async function obterConfigAvaliacao(){
 }
 function idOuvinteValido(v){ return /^[a-zA-Z0-9_-]{16,100}$/.test(String(v||'')); }
 function chaveOuvinteAvaliacao(ouvinteId,ciclo){
-  return 'av_'+crypto.createHash('sha256').update(String(ouvinteId||'')+'|'+String(ciclo||'')).digest('hex').slice(0,48);
+  const dataCiclo = new Date(ciclo);
+  const cicloCanonico = Number.isNaN(dataCiclo.getTime()) ? String(ciclo||'') : String(dataCiclo.getTime());
+  return 'av_'+crypto.createHash('sha256').update(String(ouvinteId||'')+'|'+cicloCanonico).digest('hex').slice(0,48);
 }
 
 app.post('/public/salas/:sala/participacao', async (req,res)=>{
