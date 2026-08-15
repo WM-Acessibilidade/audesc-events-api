@@ -3876,11 +3876,12 @@ app.get('/salas/:sala/avaliacao-instantanea/estado-transmissor', async (req,res)
   const {data:ultimos,error}=await sb.from('pedidos_avaliacao_audiodescricao').select('*').eq('evento_id',ev.id).order('criado_em',{ascending:false}).limit(1);
   if(error) throw error;
   const ultimo=ultimos&&ultimos[0];
-  if(!ultimo) return res.json({ok:true,ativa:true,pode_solicitar:true});
+  if(!ultimo) return res.json({ok:true,ativa:true,pode_solicitar:true,pedido_atual:null});
   const proximo=new Date(new Date(ultimo.criado_em).getTime()+AVALIACAO_INSTANTANEA_INTERVALO_MINUTOS*60000);
   const pode=proximo.getTime()<=Date.now();
+  const pedidoAtual=ultimo.ativo!==false ? {id:ultimo.id,expira_em:null,ativo:true} : null;
   res.set('Cache-Control','no-store');
-  res.json({ok:true,ativa:true,pode_solicitar:pode,proximo_pedido_em:proximo.toISOString(),pedido_atual:{id:ultimo.id,expira_em:null,ativo:ultimo.ativo!==false}});
+  res.json({ok:true,ativa:true,pode_solicitar:pode,proximo_pedido_em:proximo.toISOString(),pedido_atual:pedidoAtual});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao consultar estado da avaliacao instantanea.'})}
 });
 
