@@ -3768,6 +3768,42 @@ app.get('/admin/avaliacoes', async (req,res)=>{
   res.set('Cache-Control','no-store');res.json({ok:true,ciclos:[...ciclos.values()].sort((a,b)=>new Date(b.data_hora||0)-new Date(a.data_hora||0))});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar avaliações.'})}
 });
+
+app.delete('/admin/avaliacoes/ciclo', async (req,res)=>{
+ if(!admin(req,res))return;
+ try{
+  const tipo=String(req.body?.tipo||''), sb=getSupabase();
+  if(tipo==='instantanea'){
+    const pedidoId=String(req.body?.pedido_id||'');
+    if(!pedidoId) return res.status(400).json({error:'Pedido de avaliação não informado.'});
+    const {error:ae}=await sb.from('avaliacoes_instantaneas_audiodescricao').delete().eq('pedido_id',pedidoId); if(ae) throw ae;
+    const {error:ee}=await sb.from('elegibilidade_avaliacao_audiodescricao').delete().eq('pedido_id',pedidoId); if(ee) throw ee;
+    const {error:pe}=await sb.from('pedidos_avaliacao_audiodescricao').delete().eq('id',pedidoId); if(pe) throw pe;
+    return res.json({ok:true,mensagem:'Ciclo de avaliação instantânea excluído.'});
+  }
+  if(tipo==='final'){
+    const eventoId=String(req.body?.evento_id||''), ciclo=String(req.body?.ciclo||'');
+    if(!eventoId||!ciclo) return res.status(400).json({error:'Ciclo da avaliação não informado.'});
+    const inicio=new Date(ciclo);
+    if(Number.isNaN(inicio.getTime())) return res.status(400).json({error:'Data do ciclo inválida.'});
+    const fim=new Date(inicio.getTime()+1000).toISOString();
+    const {data:eleg,error:ee}=await sb.from('elegibilidade_avaliacoes').select('ouvinte_id').eq('evento_id',eventoId).gte('definido_em',inicio.toISOString()).lt('definido_em',fim);
+    if(ee) throw ee;
+    const ids=(eleg||[]).map(x=>x.ouvinte_id);
+    if(ids.length){
+      const {error:ae}=await sb.from('avaliacoes_transmissoes').delete().eq('evento_id',eventoId).in('ouvinte_id',ids);
+      if(ae) throw ae;
+    }
+    const {error:ede}=await sb.from('elegibilidade_avaliacoes').delete().eq('evento_id',eventoId).gte('definido_em',inicio.toISOString()).lt('definido_em',fim);
+    if(ede) throw ede;
+    const {error:se}=await sb.from('sessoes_avaliacao').delete().eq('evento_id',eventoId).eq('encerrada_em',inicio.toISOString());
+    if(se) throw se;
+    return res.json({ok:true,mensagem:'Ciclo de avaliação da transmissão excluído.'});
+  }
+  res.status(400).json({error:'Tipo de avaliação inválido.'});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao excluir ciclo de avaliação.'})}
+});
+
 app.get('/admin/avaliacoes/detalhes', async (req,res)=>{
  if(!admin(req,res))return;
  try{
