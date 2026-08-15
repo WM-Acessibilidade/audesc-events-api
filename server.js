@@ -3750,7 +3750,33 @@ app.put('/admin/avaliacoes/configuracao', async (req,res)=>{
   res.json({ok:true,config:payload});
  }catch(e){res.status(500).json({error:e.message})}
 });
-app.get('/admin/avaliacoes', async (req,res)=>{if(!admin(req,res))return;try{const {data,error}=await getSupabase().from('avaliacoes_transmissoes').select('*').order('atualizada_em',{ascending:false}).limit(1000);if(error)throw error;res.json({ok:true,avaliacoes:data||[]})}catch(e){res.status(500).json({error:e.message})}});
+app.get('/admin/avaliacoes', async (req,res)=>{
+ if(!admin(req,res))return;
+ try{
+  const sb=getSupabase();
+  const [{data:finais,error:fe},{data:eleg,error:ee},{data:instant,error:ie},{data:pedidos,error:pe}]=await Promise.all([
+   sb.from('avaliacoes_transmissoes').select('*').order('atualizada_em',{ascending:false}).limit(5000),
+   sb.from('elegibilidade_avaliacoes').select('evento_id,sala_codigo,ouvinte_id,definido_em').limit(10000),
+   sb.from('avaliacoes_instantaneas_audiodescricao').select('*').order('criado_em',{ascending:false}).limit(5000),
+   sb.from('pedidos_avaliacao_audiodescricao').select('id,evento_id,sala_codigo,criado_em').order('criado_em',{ascending:false}).limit(5000)
+  ]);
+  if(fe)throw fe;if(ee)throw ee;if(ie)throw ie;if(pe)throw pe;
+  const elegPorChave=new Map((eleg||[]).map(x=>[String(x.evento_id)+'|'+String(x.ouvinte_id),x])), ciclos=new Map();
+  for(const av of (finais||[])){const el=elegPorChave.get(String(av.evento_id)+'|'+String(av.ouvinte_id)),data=el?.definido_em||av.atualizada_em,chave='final|'+String(av.evento_id)+'|'+String(data||'');if(!ciclos.has(chave))ciclos.set(chave,{id:chave,tipo:'final',tipo_rotulo:'Avaliação da transmissão',evento_id:av.evento_id,sala_codigo:av.sala_codigo||el?.sala_codigo||'',data_hora:data,quantidade:0});ciclos.get(chave).quantidade++;}
+  const pedidoPorId=new Map((pedidos||[]).map(p=>[String(p.id),p]));
+  for(const av of (instant||[])){const p=pedidoPorId.get(String(av.pedido_id)),data=p?.criado_em||av.criado_em,chave='instantanea|'+String(av.pedido_id);if(!ciclos.has(chave))ciclos.set(chave,{id:chave,tipo:'instantanea',tipo_rotulo:'Avaliação instantânea',evento_id:av.evento_id,sala_codigo:av.sala_codigo||p?.sala_codigo||'',data_hora:data,quantidade:0,pedido_id:av.pedido_id});ciclos.get(chave).quantidade++;}
+  res.set('Cache-Control','no-store');res.json({ok:true,ciclos:[...ciclos.values()].sort((a,b)=>new Date(b.data_hora||0)-new Date(a.data_hora||0))});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar avaliações.'})}
+});
+app.get('/admin/avaliacoes/detalhes', async (req,res)=>{
+ if(!admin(req,res))return;
+ try{
+  const tipo=String(req.query.tipo||''),sb=getSupabase();
+  if(tipo==='instantanea'){const pedidoId=String(req.query.pedido_id||'');if(!pedidoId)return res.status(400).json({error:'Pedido de avaliação não informado.'});const {data:pedido,error:pe}=await sb.from('pedidos_avaliacao_audiodescricao').select('*').eq('id',pedidoId).maybeSingle();if(pe)throw pe;if(!pedido)return res.status(404).json({error:'Ciclo de avaliação não encontrado.'});const {data:respostas,error}=await sb.from('avaliacoes_instantaneas_audiodescricao').select('*').eq('pedido_id',pedidoId).order('criado_em',{ascending:true});if(error)throw error;return res.json({ok:true,tipo:'instantanea',tipo_rotulo:'Avaliação instantânea',sala_codigo:pedido.sala_codigo||'',data_hora:pedido.criado_em,respostas:respostas||[]});}
+  if(tipo==='final'){const eventoId=String(req.query.evento_id||''),ciclo=String(req.query.ciclo||'');if(!eventoId||!ciclo)return res.status(400).json({error:'Ciclo da avaliação não informado.'});const inicio=new Date(ciclo);if(Number.isNaN(inicio.getTime()))return res.status(400).json({error:'Data do ciclo inválida.'});const fim=new Date(inicio.getTime()+1000).toISOString();const {data:eleg,error:ee}=await sb.from('elegibilidade_avaliacoes').select('ouvinte_id,sala_codigo,definido_em').eq('evento_id',eventoId).gte('definido_em',inicio.toISOString()).lt('definido_em',fim);if(ee)throw ee;const ids=(eleg||[]).map(x=>x.ouvinte_id);let respostas=[];if(ids.length){const {data,error}=await sb.from('avaliacoes_transmissoes').select('*').eq('evento_id',eventoId).in('ouvinte_id',ids).order('atualizada_em',{ascending:true});if(error)throw error;respostas=data||[];}return res.json({ok:true,tipo:'final',tipo_rotulo:'Avaliação da transmissão',sala_codigo:(eleg&&eleg[0]?.sala_codigo)||'',data_hora:inicio.toISOString(),respostas});}
+  res.status(400).json({error:'Tipo de avaliação inválido.'});
+ }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao carregar detalhes da avaliação.'})}
+});
 
 
 
