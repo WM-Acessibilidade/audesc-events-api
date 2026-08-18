@@ -3081,11 +3081,37 @@ app.patch('/admin/eventos/:id', async (req, res) => {
     if(Object.prototype.hasOwnProperty.call(update,'valor_agenda_definido_por_admin')) update.valor_agenda_definido_por_admin = !!update.valor_agenda_definido_por_admin;
     if(Object.prototype.hasOwnProperty.call(update,'pais')) update.pais = text(update.pais);
     if(Object.prototype.hasOwnProperty.call(update,'uf')) update.uf = (update.pais === 'Outros' || update.pais === 'Internacional') ? '' : text(update.uf);
-    if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo || codigoPaisMaps(update.pais),10);
-    if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
-    const paisParaTimezoneAdmin = update.pais === 'Internacional' ? update.origem_transmissao : update.pais;
-    if(Object.prototype.hasOwnProperty.call(update,'pais') || Object.prototype.hasOwnProperty.call(update,'uf') || Object.prototype.hasOwnProperty.call(update,'origem_transmissao') || Object.prototype.hasOwnProperty.call(update,'pais_codigo') || Object.prototype.hasOwnProperty.call(update,'unidade_codigo') || Object.prototype.hasOwnProperty.call(update,'timezone')) update.timezone = timezonePorLocal(update.pais_codigo, update.unidade_codigo, paisParaTimezoneAdmin);
-    if(Object.prototype.hasOwnProperty.call(update,'data_evento')) update.data_evento = prepararDataEvento(update.data_evento, update.timezone);
+
+    const alterouLocalAdmin =
+      Object.prototype.hasOwnProperty.call(update,'pais') ||
+      Object.prototype.hasOwnProperty.call(update,'uf') ||
+      Object.prototype.hasOwnProperty.call(update,'origem_transmissao') ||
+      Object.prototype.hasOwnProperty.call(update,'pais_codigo') ||
+      Object.prototype.hasOwnProperty.call(update,'unidade_codigo') ||
+      Object.prototype.hasOwnProperty.call(update,'timezone');
+
+    if(alterouLocalAdmin){
+      const paisParaTimezoneAdmin = update.pais === 'Internacional' ? text(update.origem_transmissao) : text(update.pais);
+      // No painel administrativo, país e UF podem chegar sem os códigos auxiliares.
+      // Recalcular sempre a partir dos valores efetivamente selecionados evita herdar códigos da localidade anterior.
+      const paisCodigoAdmin = limit(update.pais_codigo || codigoPaisMaps(paisParaTimezoneAdmin),10);
+      const unidadeCodigoAdmin = limit(
+        update.unidade_codigo || codigoUnidadeLocal(paisCodigoAdmin, update.uf || '', ''),
+        20
+      );
+      update.pais_codigo = paisCodigoAdmin;
+      update.unidade_codigo = unidadeCodigoAdmin;
+      const tzCalculado = timezonePorLocal(paisCodigoAdmin, unidadeCodigoAdmin, paisParaTimezoneAdmin);
+      update.timezone = timezoneValido(tzCalculado) ? tzCalculado : 'America/Sao_Paulo';
+    }else{
+      if(Object.prototype.hasOwnProperty.call(update,'pais_codigo')) update.pais_codigo = limit(update.pais_codigo,10);
+      if(Object.prototype.hasOwnProperty.call(update,'unidade_codigo')) update.unidade_codigo = limit(update.unidade_codigo,20);
+    }
+
+    if(Object.prototype.hasOwnProperty.call(update,'data_evento')){
+      // Se o painel enviou datetime-local, interpretar no fuso recém-calculado.
+      update.data_evento = prepararDataEvento(update.data_evento, update.timezone);
+    }
     if(Object.prototype.hasOwnProperty.call(update,'cidade')) update.cidade = limit(update.cidade,120);
     if(Object.prototype.hasOwnProperty.call(update,'sala_codigo')) update.sala_codigo = limit(update.sala_codigo,120);
     if(Object.prototype.hasOwnProperty.call(update,'senha_transmissor')) update.senha_transmissor = limit(update.senha_transmissor,80);
