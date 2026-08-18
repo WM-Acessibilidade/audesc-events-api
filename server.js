@@ -1228,27 +1228,19 @@ function codigoPaisMaps(pais){
 
 
 const TIMEZONE_POR_PAIS = {
-  BR: 'America/Sao_Paulo',
-  PT: 'Europe/Lisbon',
-  AO: 'Africa/Luanda',
-  MZ: 'Africa/Maputo',
-  CV: 'Atlantic/Cape_Verde',
-  GW: 'Africa/Bissau',
-  GQ: 'Africa/Malabo',
-  ST: 'Africa/Sao_Tome',
-  TL: 'Asia/Dili'
+  BR:'America/Sao_Paulo', AO:'Africa/Luanda', CV:'Atlantic/Cape_Verde', GW:'Africa/Bissau', GQ:'Africa/Malabo', MZ:'Africa/Maputo', PT:'Europe/Lisbon', ST:'Africa/Sao_Tome', TL:'Asia/Dili',
+  US:'America/New_York', CA:'America/Toronto', ES:'Europe/Madrid', FR:'Europe/Paris', DE:'Europe/Berlin', GB:'Europe/London', IT:'Europe/Rome', NL:'Europe/Amsterdam', IE:'Europe/Dublin', CH:'Europe/Zurich',
+  AU:'Australia/Sydney', NZ:'Pacific/Auckland', MX:'America/Mexico_City', AR:'America/Argentina/Buenos_Aires', CL:'America/Santiago', CO:'America/Bogota', JP:'Asia/Tokyo', KR:'Asia/Seoul', AE:'Asia/Dubai'
 };
 const TIMEZONE_POR_UNIDADE = {
-  BR: {
-    AC:'America/Rio_Branco',
-    AM:'America/Manaus',
-    RO:'America/Porto_Velho',
-    RR:'America/Boa_Vista',
-    MT:'America/Cuiaba',
-    MS:'America/Campo_Grande',
-    DF:'America/Sao_Paulo'
-  },
-  PT: { ACO:'Atlantic/Azores', MAD:'Europe/Lisbon' }
+  BR:{AC:'America/Rio_Branco',AM:'America/Manaus',RO:'America/Porto_Velho',RR:'America/Boa_Vista',MT:'America/Cuiaba',MS:'America/Campo_Grande',DF:'America/Sao_Paulo',BA:'America/Bahia',SE:'America/Maceio',AL:'America/Maceio',PE:'America/Recife',PB:'America/Fortaleza',RN:'America/Fortaleza',CE:'America/Fortaleza',PI:'America/Fortaleza',MA:'America/Fortaleza',PA:'America/Belem',AP:'America/Belem',TO:'America/Araguaina'},
+  PT:{ACO:'Atlantic/Azores',MAD:'Europe/Lisbon'},
+  US:{'US-AL':'America/Chicago','US-AK':'America/Anchorage','US-AZ':'America/Phoenix','US-AR':'America/Chicago','US-CA':'America/Los_Angeles','US-CO':'America/Denver','US-CT':'America/New_York','US-DE':'America/New_York','US-DC':'America/New_York','US-FL':'America/New_York','US-GA':'America/New_York','US-HI':'Pacific/Honolulu','US-ID':'America/Boise','US-IL':'America/Chicago','US-IN':'America/Indiana/Indianapolis','US-IA':'America/Chicago','US-KS':'America/Chicago','US-KY':'America/New_York','US-LA':'America/Chicago','US-ME':'America/New_York','US-MD':'America/New_York','US-MA':'America/New_York','US-MI':'America/Detroit','US-MN':'America/Chicago','US-MS':'America/Chicago','US-MO':'America/Chicago','US-MT':'America/Denver','US-NE':'America/Chicago','US-NV':'America/Los_Angeles','US-NH':'America/New_York','US-NJ':'America/New_York','US-NM':'America/Denver','US-NY':'America/New_York','US-NC':'America/New_York','US-ND':'America/Chicago','US-OH':'America/New_York','US-OK':'America/Chicago','US-OR':'America/Los_Angeles','US-PA':'America/New_York','US-RI':'America/New_York','US-SC':'America/New_York','US-SD':'America/Chicago','US-TN':'America/Chicago','US-TX':'America/Chicago','US-UT':'America/Denver','US-VT':'America/New_York','US-VA':'America/New_York','US-WA':'America/Los_Angeles','US-WV':'America/New_York','US-WI':'America/Chicago','US-WY':'America/Denver','US-PR':'America/Puerto_Rico','US-GU':'Pacific/Guam','US-AS':'Pacific/Pago_Pago','US-MP':'Pacific/Saipan','US-VI':'America/St_Thomas'},
+  CA:{'CA-AB':'America/Edmonton','CA-BC':'America/Vancouver','CA-MB':'America/Winnipeg','CA-NB':'America/Moncton','CA-NL':'America/St_Johns','CA-NS':'America/Halifax','CA-NT':'America/Yellowknife','CA-NU':'America/Iqaluit','CA-ON':'America/Toronto','CA-PE':'America/Halifax','CA-QC':'America/Toronto','CA-SK':'America/Regina','CA-YT':'America/Whitehorse'},
+  ES:{'ES-CN':'Atlantic/Canary'},
+  AU:{'AU-ACT':'Australia/Sydney','AU-NSW':'Australia/Sydney','AU-NT':'Australia/Darwin','AU-QLD':'Australia/Brisbane','AU-SA':'Australia/Adelaide','AU-TAS':'Australia/Hobart','AU-VIC':'Australia/Melbourne','AU-WA':'Australia/Perth'},
+  MX:{'MX-BCN':'America/Tijuana','MX-BCS':'America/Mazatlan','MX-SON':'America/Hermosillo','MX-CHH':'America/Chihuahua','MX-SIN':'America/Mazatlan','MX-NAY':'America/Mazatlan','MX-ROO':'America/Cancun'},
+  CL:{'CL-VS':'America/Santiago','CL-RM':'America/Santiago'}
 };
 function timezoneValido(tz){
   try{ new Intl.DateTimeFormat('en-US',{timeZone:tz}).format(new Date()); return true; }catch(e){ return false; }
@@ -1959,7 +1951,7 @@ function escapeEmailHtml(v){
 
 function montarEmailLiberacao(ev, senha, sala){
   const titulo = ev.titulo_publicado || ev.titulo_original || 'Evento Audesc';
-  const dataEvento = ev.data_evento ? new Date(ev.data_evento).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '';
+  const dataEvento = ev.data_evento ? new Date(ev.data_evento).toLocaleString('pt-BR', { timeZone: timezoneValido(ev.timezone)?ev.timezone:'America/Sao_Paulo' }) : '';
   const duracao = ev.duracao_horas ? `${ev.duracao_horas} hora(s)` : '';
   const maxOuvintes = ev.max_ouvintes ? `${ev.max_ouvintes} ouvinte(s)` : '';
   const subject = `Audesc: acesso liberado para ${titulo}`;
@@ -2143,7 +2135,7 @@ function formatarMoeda(valor, moeda){
 }
 function formatarDataEvento(ev){
   if(!ev?.data_evento) return '';
-  try{return new Date(ev.data_evento).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'});}catch{return String(ev.data_evento);}
+  try{return new Date(ev.data_evento).toLocaleString('pt-BR',{timeZone:timezoneValido(ev.timezone)?ev.timezone:'America/Sao_Paulo'});}catch{return String(ev.data_evento);}
 }
 
 function montarEmailAgenda(ev, status){
