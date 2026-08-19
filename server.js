@@ -4813,6 +4813,138 @@ async function encerrarEstadoAudescPeloAdmin(sala){
 }
 app.get('/admin/monitoramento',async(req,res)=>{if(!admin(req,res))return;try{const svc=livekitRoomService(),rooms=await svc.listRooms(),meta=await metadadosSalasAudesc((rooms||[]).map(r=>r.name)),ao_vivo=[];for(const r of rooms||[]){const ps=await svc.listParticipants(r.name),reais=(ps||[]).filter(p=>!participanteEhMonitor(p)),tx=reais.filter(participantePodePublicar),ouv=reais.filter(p=>!participantePodePublicar(p)),m=meta.get(String(r.name))||{tipo_sala:'desconhecida',titulo:r.name};ao_vivo.push({sala_codigo:r.name,titulo:m.titulo,tipo_sala:m.tipo_sala,id:m.id||null,ouvintes:ouv.length,transmissor_presente:tx.length>0,transmissores:tx.map(p=>({identity:p.identity,name:p.name||''})),participantes_total:reais.length,data_evento:m.data_evento||null,status_operacao:m.status_operacao||null})}const agenda=await agendaMonitoramento24h();res.json({ok:true,atualizado_em:new Date().toISOString(),resumo:{salas_ao_vivo:ao_vivo.length,ouvintes_ao_vivo:ao_vivo.reduce((n,x)=>n+x.ouvintes,0),salas_sem_transmissor:ao_vivo.filter(x=>!x.transmissor_presente).length},ao_vivo,proximas_24h:agenda.proximas,ultimas_24h:agenda.ultimas})}catch(e){console.error('Monitoramento:',e);res.status(500).json({error:e.message||'Erro ao consultar monitoramento.'})}});
 app.post('/admin/monitoramento/:sala/encerrar',async(req,res)=>{if(!admin(req,res))return;try{const sala=limit(req.params.sala,120);if(!sala)return res.status(400).json({error:'Sala não informada.'});const estado=await encerrarEstadoAudescPeloAdmin(sala);try{await livekitRoomService().deleteRoom(sala)}catch(e){console.warn('Falha ao remover sala LiveKit:',e.message||e)}res.json({ok:true,sala_codigo:sala,estado})}catch(e){res.status(500).json({error:e.message||'Erro ao encerrar sala.'})}});
-app.post('/admin/monitoramento/:sala/token',async(req,res)=>{if(!admin(req,res))return;try{const sala=limit(req.params.sala,120);if(!sala)return res.status(400).json({error:'Sala não informada.'});const identity='audesc-admin-monitor-'+crypto.randomBytes(6).toString('hex'),token=gerarLiveKitToken({room:sala,identity,role:'receiver'});res.json({ok:true,token,room:sala,identity,livekit_url:LIVEKIT_URL_MONITOR})}catch(e){res.status(500).json({error:e.message||'Erro ao gerar acesso de monitoramento.'})}});
+function gerarLiveKitTokenMonitor({room,identity}){
+  const apiKey=process.env.LIVEKIT_API_KEY||process.env.LIVEKIT_KEY||'';
+  const apiSecret=process.env.LIVEKIT_API_SECRET||process.env.LIVEKIT_SECRET||'';
+  if(!apiKey||!apiSecret)throw new Error('Credenciais do LiveKit não configuradas.');
+  const agora=Math.floor(Date.now()/1000);
+  return assinarJwtHs256({
+    iss:apiKey,
+    sub:identity,
+    nbf:agora-10,
+    exp:agora+2*60*60,
+    metadata:JSON.stringify({audesc_role:'admin_monitor'}),
+    video:{
+      roomJoin:true,
+      room,
+      canPublish:false,
+      canSubscribe:true,
+      canPublishData:false,
+      canUpdateOwnMetadata:false
+    }
+  },apiSecret);
+}
+app.post('/admin/monitoramento/:sala/token',async(req,res)=>{
+  if(!admin(req,res))return;
+  try{
+    const sala=limit(req.params.sala,120);
+    if(!sala)return res.status(400).json({error:'Sala não informada.'});
+    const identity='audesc-admin-monitor-'+crypto.randomBytes(6).toString('hex');
+    const token=gerarLiveKitTokenMonitor({room:sala,identity});
+    res.json({ok:true,token,room:sala,identity,livekit_url:LIVEKIT_URL_MONITOR,modo:'somente_escuta'});
+  }catch(e){res.status(500).json({error:e.message||'Erro ao gerar acesso de monitoramento.'})}
+});
+
+// Fase 6.21.1 — consumo mensal LiveKit via Analytics API oficial, quando disponível.
+// A Analytics API exige plano compatível e LIVEKIT_PROJECT_ID.
+let CACHE_CONSUMO_LIVEKIT={expira:0,valor:null};
+
+function tokenAnalyticsLiveKit(){
+  const apiKey=process.env.LIVEKIT_API_KEY||process.env.LIVEKIT_KEY||'';
+  const apiSecret=process.env.LIVEKIT_API_SECRET||process.env.LIVEKIT_SECRET||'';
+  if(!apiKey||!apiSecret)throw new Error('Credenciais LiveKit não configuradas.');
+  const agora=Math.floor(Date.now()/1000);
+  return assinarJwtHs256({
+    iss:apiKey,
+    sub:'audesc-admin-analytics',
+    nbf:agora-10,
+    exp:agora+15*60,
+    video:{roomList:true}
+  },apiSecret);
+}
+function ymdUTC(d){return d.toISOString().slice(0,10)}
+async function analyticsJson(url,token){
+  const r=await fetch(url,{headers:{Authorization:'Bearer '+token,Accept:'application/json'}});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){
+    const erro=new Error(j.message||j.error||('LiveKit Analytics HTTP '+r.status));
+    erro.status=r.status;
+    throw erro;
+  }
+  return j;
+}
+async function consumoMensalLiveKit(){
+  if(CACHE_CONSUMO_LIVEKIT.valor&&CACHE_CONSUMO_LIVEKIT.expira>Date.now())return CACHE_CONSUMO_LIVEKIT.valor;
+  const projectId=String(process.env.LIVEKIT_PROJECT_ID||'').trim();
+  const limite=Number(process.env.LIVEKIT_MONTHLY_PARTICIPANT_MINUTES||0);
+  if(!projectId){
+    return {disponivel:false,fonte:'livekit_cloud',motivo:'LIVEKIT_PROJECT_ID não configurado.',limite_mensal_minutos:limite>0?limite:null};
+  }
+  const token=tokenAnalyticsLiveKit();
+  const agora=new Date();
+  const inicioMes=new Date(Date.UTC(agora.getUTCFullYear(),agora.getUTCMonth(),1));
+  const sessoes=new Map();
+  let cursor=new Date(inicioMes);
+
+  // A API só aceita início dentro de uma janela curta; consultamos em blocos de até 7 dias.
+  while(cursor<=agora){
+    const fimTrecho=new Date(Math.min(agora.getTime(),cursor.getTime()+6*86400000));
+    let page=0;
+    while(true){
+      const u=new URL(`https://cloud-api.livekit.io/api/project/${encodeURIComponent(projectId)}/sessions`);
+      u.searchParams.set('start',ymdUTC(cursor));
+      u.searchParams.set('end',ymdUTC(fimTrecho));
+      u.searchParams.set('page',String(page));
+      u.searchParams.set('limit','100');
+      const j=await analyticsJson(u.toString(),token);
+      const arr=Array.isArray(j.sessions)?j.sessions:[];
+      for(const s of arr){
+        const id=s.sessionId||s.session_id;
+        if(id)sessoes.set(String(id),s);
+      }
+      if(arr.length<100)break;
+      page++;
+      if(page>20)break;
+    }
+    cursor=new Date(fimTrecho.getTime()+86400000);
+  }
+
+  let minutos=0,detalhadas=0;
+  for(const sessionId of sessoes.keys()){
+    const j=await analyticsJson(`https://cloud-api.livekit.io/api/project/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`,token);
+    const m=Number(j.connectionMinutes||j.connection_minutes||0);
+    if(Number.isFinite(m)){minutos+=m;detalhadas++}
+  }
+  const valor={
+    disponivel:true,
+    fonte:'livekit_analytics',
+    mes:ymdUTC(inicioMes).slice(0,7),
+    minutos_consumidos:Math.round(minutos),
+    sessoes_consideradas:detalhadas,
+    limite_mensal_minutos:limite>0?limite:null,
+    minutos_restantes:limite>0?Math.max(0,Math.round(limite-minutos)):null,
+    atualizado_em:new Date().toISOString()
+  };
+  CACHE_CONSUMO_LIVEKIT={expira:Date.now()+10*60*1000,valor};
+  return valor;
+}
+app.get('/admin/monitoramento/consumo-livekit',async(req,res)=>{
+  if(!admin(req,res))return;
+  try{
+    res.json({ok:true,consumo:await consumoMensalLiveKit()});
+  }catch(e){
+    const s=Number(e.status)||500;
+    if([401,403,404].includes(s)){
+      return res.json({ok:true,consumo:{
+        disponivel:false,
+        fonte:'livekit_cloud',
+        motivo:'A Analytics API do LiveKit não está disponível para este projeto/plano ou o LIVEKIT_PROJECT_ID está incorreto.',
+        limite_mensal_minutos:Number(process.env.LIVEKIT_MONTHLY_PARTICIPANT_MINUTES||0)||null
+      }});
+    }
+    res.status(500).json({error:e.message||'Erro ao consultar consumo do LiveKit.'});
+  }
+});
+
 
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));
