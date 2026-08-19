@@ -5,6 +5,7 @@ const { google } = require('googleapis');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { RoomServiceClient } = require('livekit-server-sdk');
 
 const app = express();
 app.use(cors());
@@ -4780,5 +4781,38 @@ app.get('/meus-eventos/:id', async (req,res)=>{
   res.status(500).json({error:e.message || 'Erro ao carregar evento.'});
  }
 });
+
+
+// Fase 6.21 — Monitoramento operacional de salas LiveKit.
+const LIVEKIT_URL_MONITOR = process.env.LIVEKIT_URL || process.env.LIVEKIT_SERVER_URL || 'wss://audesc-live-dh77x30o.livekit.cloud';
+function livekitHttpUrl(){ return String(LIVEKIT_URL_MONITOR||'').replace(/^wss:/i,'https:').replace(/^ws:/i,'http:'); }
+function livekitRoomService(){ const k=process.env.LIVEKIT_API_KEY||process.env.LIVEKIT_KEY||''; const s=process.env.LIVEKIT_API_SECRET||process.env.LIVEKIT_SECRET||''; if(!k||!s)throw new Error('Credenciais LiveKit não configuradas.'); return new RoomServiceClient(livekitHttpUrl(),k,s); }
+function participanteEhMonitor(p){return String(p&&p.identity||'').startsWith('audesc-admin-monitor-')}
+function participantePodePublicar(p){return !!(p&&p.permission&&p.permission.canPublish)}
+async function metadadosSalasAudesc(codigos){
+ const sb=getSupabase(),mapa=new Map(),lista=[...new Set((codigos||[]).filter(Boolean))]; if(!lista.length)return mapa;
+ const q=await sb.from('eventos').select('id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,margem_transmissao_minutos,status_operacao,status_publicacao,tipo_evento').in('sala_codigo',lista); if(q.error)throw q.error;
+ for(const e of q.data||[])mapa.set(String(e.sala_codigo),{tipo_sala:'evento',id:e.id,titulo:e.titulo_publicado||e.titulo_original||'Evento Audesc',data_evento:e.data_evento,status_operacao:e.status_operacao});
+ const restantes=lista.filter(c=>!mapa.has(String(c))); if(restantes.length){const d=await sb.from('salas_demonstracao').select('*').in('sala_codigo',restantes);if(d.error)throw d.error;for(const x of d.data||[])mapa.set(String(x.sala_codigo),{tipo_sala:'demonstracao',id:x.id,titulo:x.nome||'Sala de Demonstração Audesc',data_evento:x.sessao_atual_iniciada_em,status_operacao:(x.ativa&&!x.bloqueada)?'liberado':'nao_liberado'});}
+ return mapa;
+}
+async function agendaMonitoramento24h(){
+ const sb=getSupabase(),agora=new Date(),ini=new Date(agora-86400000),fim=new Date(agora.getTime()+86400000),proximas=[],ultimas=[];
+ const q=await sb.from('eventos').select('id,titulo_original,titulo_publicado,sala_codigo,data_evento,duracao_horas,status_operacao,status_publicacao,tipo_evento').not('sala_codigo','is',null).gte('data_evento',ini.toISOString()).lte('data_evento',fim.toISOString()).order('data_evento',{ascending:true});if(q.error)throw q.error;
+ for(const e of q.data||[]){const d=new Date(e.data_evento);if(Number.isNaN(d.getTime()))continue;const x={id:e.id,tipo_sala:'evento',titulo:e.titulo_publicado||e.titulo_original||'Evento Audesc',sala_codigo:e.sala_codigo,data_evento:e.data_evento,duracao_horas:e.duracao_horas,status_operacao:e.status_operacao};(d>=agora?proximas:ultimas).push(x)}
+ const z=await sb.from('salas_demonstracao').select('*').gte('sessao_atual_iniciada_em',ini.toISOString()).lte('sessao_atual_iniciada_em',fim.toISOString()).order('sessao_atual_iniciada_em',{ascending:true});if(z.error)throw z.error;
+ for(const d of z.data||[]){const dt=new Date(d.sessao_atual_iniciada_em);if(Number.isNaN(dt.getTime()))continue;const x={id:d.id,tipo_sala:'demonstracao',titulo:d.nome||'Sala de Demonstração Audesc',sala_codigo:d.sala_codigo,data_evento:d.sessao_atual_iniciada_em,duracao_horas:Number(d.duracao_sessao_minutos||0)/60,status_operacao:(d.ativa&&!d.bloqueada)?'liberado':'nao_liberado'};(dt>=agora?proximas:ultimas).push(x)}
+ return {proximas,ultimas};
+}
+async function encerrarEstadoAudescPeloAdmin(sala){
+ const sb=getSupabase(),ev=await buscarEventoOuPlanilhaPorSala(sb,sala,'id,sala_codigo,senha_transmissor,titulo_original,titulo_publicado');if(!ev)return {encontrada:false};const fim=new Date();
+ await sb.from('pedidos_avaliacao_audiodescricao').update({ativo:false}).eq('evento_id',ev.id).eq('ativo',true);
+ if(ev.tipo_sala==='demonstracao'&&ev.demonstracao){const n=Number(ev.demonstracao.sessoes_utilizadas||0);await encerrarHistoricoSessaoDemonstracao(sb,ev.id,n,fim,'encerrada_pelo_administrador');const u=await sb.from('salas_demonstracao').update({sessao_atual_encerrada_em:fim.toISOString(),updated_at:fim.toISOString()}).eq('id',ev.id);if(u.error)throw u.error;}
+ else{const cfg=await obterConfigAvaliacao(),expira=new Date(fim.getTime()+Math.max(15,Number(cfg.prazo_minutos||60))*60000);const u=await sb.from('sessoes_avaliacao').upsert({evento_id:ev.id,sala_codigo:ev.sala_codigo||sala,encerrada_em:fim.toISOString(),avaliacao_expira_em:expira.toISOString(),avaliacao_ativa:cfg.ativa!==false},{onConflict:'evento_id'});if(u.error)throw u.error;}
+ return {encontrada:true,tipo_sala:ev.tipo_sala||'evento',id:ev.id};
+}
+app.get('/admin/monitoramento',async(req,res)=>{if(!admin(req,res))return;try{const svc=livekitRoomService(),rooms=await svc.listRooms(),meta=await metadadosSalasAudesc((rooms||[]).map(r=>r.name)),ao_vivo=[];for(const r of rooms||[]){const ps=await svc.listParticipants(r.name),reais=(ps||[]).filter(p=>!participanteEhMonitor(p)),tx=reais.filter(participantePodePublicar),ouv=reais.filter(p=>!participantePodePublicar(p)),m=meta.get(String(r.name))||{tipo_sala:'desconhecida',titulo:r.name};ao_vivo.push({sala_codigo:r.name,titulo:m.titulo,tipo_sala:m.tipo_sala,id:m.id||null,ouvintes:ouv.length,transmissor_presente:tx.length>0,transmissores:tx.map(p=>({identity:p.identity,name:p.name||''})),participantes_total:reais.length,data_evento:m.data_evento||null,status_operacao:m.status_operacao||null})}const agenda=await agendaMonitoramento24h();res.json({ok:true,atualizado_em:new Date().toISOString(),resumo:{salas_ao_vivo:ao_vivo.length,ouvintes_ao_vivo:ao_vivo.reduce((n,x)=>n+x.ouvintes,0),salas_sem_transmissor:ao_vivo.filter(x=>!x.transmissor_presente).length},ao_vivo,proximas_24h:agenda.proximas,ultimas_24h:agenda.ultimas})}catch(e){console.error('Monitoramento:',e);res.status(500).json({error:e.message||'Erro ao consultar monitoramento.'})}});
+app.post('/admin/monitoramento/:sala/encerrar',async(req,res)=>{if(!admin(req,res))return;try{const sala=limit(req.params.sala,120);if(!sala)return res.status(400).json({error:'Sala não informada.'});const estado=await encerrarEstadoAudescPeloAdmin(sala);try{await livekitRoomService().deleteRoom(sala)}catch(e){console.warn('Falha ao remover sala LiveKit:',e.message||e)}res.json({ok:true,sala_codigo:sala,estado})}catch(e){res.status(500).json({error:e.message||'Erro ao encerrar sala.'})}});
+app.post('/admin/monitoramento/:sala/token',async(req,res)=>{if(!admin(req,res))return;try{const sala=limit(req.params.sala,120);if(!sala)return res.status(400).json({error:'Sala não informada.'});const identity='audesc-admin-monitor-'+crypto.randomBytes(6).toString('hex'),token=gerarLiveKitToken({room:sala,identity,role:'receiver'});res.json({ok:true,token,room:sala,identity,livekit_url:LIVEKIT_URL_MONITOR})}catch(e){res.status(500).json({error:e.message||'Erro ao gerar acesso de monitoramento.'})}});
 
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));
