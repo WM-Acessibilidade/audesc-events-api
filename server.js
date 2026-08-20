@@ -4959,8 +4959,34 @@ async function obterMonitorAlertConfig(){const {data,error}=await getSupabase().
 async function salvarMonitorAlertConfig(config){const limpo=sanitizarMonitorAlertConfig(config),{data,error}=await getSupabase().from('formulario_config').upsert({id:MONITOR_ALERT_CONFIG_ID,config:limpo,updated_at:new Date().toISOString()},{onConflict:'id'}).select('config').single();if(error)throw error;return sanitizarMonitorAlertConfig(data.config);}
 function classeAlertaSala(meta){if(meta?.tipo_sala==='demonstracao')return 'demonstracao';return String(meta?.tipo_evento||'').toLowerCase()==='restrito'?'evento_restrito':'evento_publico';}
 function alertaTipoHabilitado(cfg,meta){return cfg?.tipos?.[classeAlertaSala(meta)]!==false;}
-async function enviarEmailSalaAbertaMonitoramento(sala,meta,cfg){if(!cfg?.ativo||cfg?.canais?.email!==true||!alertaTipoHabilitado(cfg,meta))return {ok:false,skipped:true};const emails=(cfg.emails||[]).map(emailMonitorValido).filter(Boolean);if(!emails.length)return {ok:false,skipped:true};const tipo=meta?.tipo_sala==='demonstracao'?'Demonstração':(String(meta?.tipo_evento||'').toLowerCase()==='restrito'?'Evento restrito':'Evento público'),titulo=meta?.titulo||sala,assunto=`Audesc: transmissão iniciada — ${titulo}`,texto=['Uma nova transmissão foi detectada no Audesc.','',`Evento: ${titulo}`,`Tipo: ${tipo}`,`Sala: ${sala}`,`Detectada em: ${new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})}`,'','Acesse o painel de monitoramento do Audesc para acompanhar a sala.'].join('\\n');return await enviarEmailResend({to:emails,subject:assunto,text:texto,tags:[{name:'tipo',value:'monitoramento_sala_aberta'}]});}
+async function enviarEmailSalaAbertaMonitoramento(sala,meta,cfg){
+  if(!cfg?.ativo||cfg?.canais?.email!==true||!alertaTipoHabilitado(cfg,meta))return {ok:false,skipped:true,reason:'alerta desativado para esta sala'};
+  const emails=(cfg.emails||[]).map(emailMonitorValido).filter(Boolean);
+  if(!emails.length)return {ok:false,skipped:true,reason:'sem destinatários'};
+  const tipo=meta?.tipo_sala==='demonstracao'?'Demonstração':(String(meta?.tipo_evento||'').toLowerCase()==='restrito'?'Evento restrito':'Evento público');
+  const titulo=meta?.titulo||sala,assunto=`Audesc: transmissão iniciada — ${titulo}`;
+  const texto=['Uma nova transmissão foi detectada no Audesc.','',`Evento: ${titulo}`,`Tipo: ${tipo}`,`Sala: ${sala}`,`Detectada em: ${new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})}`,'','Acesse o painel de monitoramento do Audesc para acompanhar a sala.'].join('\n');
+  const resultado=await enviarEmailResend({to:emails,subject:assunto,text:texto,tags:[{name:'tipo',value:'monitoramento_sala_aberta'}]});
+  await registrarEmailEnvio({tipo:'monitoramento_sala_aberta',evento_id:meta?.id||null,destinatarios:emails,email_destino:emails[0]||null,assunto,mensagem:texto,status:resultado.ok?'enviado':(resultado.skipped?'nao_enviado':'erro'),erro:resultado.ok?null:JSON.stringify(resultado),response:resultado});
+  if(!resultado.ok){const erro=new Error(resultado.reason||resultado.error?.message||resultado.error?.name||'Resend não confirmou o envio.');erro.resultado=resultado;throw erro}
+  return resultado;
+}
 async function verificarNovasSalasParaAlertas(){if(MONITOR_ALERT_WATCHER_BUSY)return;MONITOR_ALERT_WATCHER_BUSY=true;try{const cfg=await obterMonitorAlertConfig(),svc=livekitRoomService(),rooms=await svc.listRooms(),atuais=new Set((rooms||[]).map(r=>String(r.name)).filter(Boolean)),meta=await metadadosSalasAudesc([...atuais]);if(MONITOR_ALERT_WATCHER_BASELINE===null){MONITOR_ALERT_WATCHER_BASELINE=atuais;return;}const novas=[...atuais].filter(s=>!MONITOR_ALERT_WATCHER_BASELINE.has(s));MONITOR_ALERT_WATCHER_BASELINE=atuais;if(!cfg.ativo||cfg.canais.email!==true||!novas.length)return;for(const sala of novas){const m=meta.get(String(sala))||{tipo_sala:'evento',tipo_evento:'publico',titulo:sala};if(!alertaTipoHabilitado(cfg,m))continue;try{await enviarEmailSalaAbertaMonitoramento(sala,m,cfg)}catch(e){console.error('Falha no e-mail de alerta de nova sala:',sala,e&&e.message?e.message:e)}}}catch(e){console.error('Falha no monitor automático de novas salas:',e&&e.message?e.message:e)}finally{MONITOR_ALERT_WATCHER_BUSY=false;}}
+
+app.post('/admin/monitoramento/testar-email',async(req,res)=>{
+  if(!admin(req,res))return;
+  try{
+    const emails=Array.isArray(req.body?.emails)?req.body.emails.map(emailMonitorValido).filter(Boolean):[];
+    const unicos=[...new Set(emails)].slice(0,20);
+    if(!unicos.length)return res.status(400).json({error:'Informe pelo menos um destinatário válido.'});
+    const assunto='Audesc: teste do alerta de monitoramento';
+    const texto=['Este é um e-mail de teste do módulo de monitoramento do Audesc.','',`Enviado em: ${new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})}`,'','Se você recebeu esta mensagem, o canal de e-mail do monitoramento está funcionando.'].join('\n');
+    const resultado=await enviarEmailResend({to:unicos,subject:assunto,text:texto,tags:[{name:'tipo',value:'monitoramento_teste'}]});
+    await registrarEmailEnvio({tipo:'monitoramento_teste',destinatarios:unicos,email_destino:unicos[0],assunto,mensagem:texto,status:resultado.ok?'enviado':(resultado.skipped?'nao_enviado':'erro'),erro:resultado.ok?null:JSON.stringify(resultado),response:resultado});
+    if(!resultado.ok)return res.status(502).json({error:resultado.reason||resultado.error?.message||resultado.error?.name||'O Resend não confirmou o envio.',details:resultado});
+    res.json({ok:true,destinatarios:unicos,response:resultado.response||null});
+  }catch(e){console.error('Teste de e-mail do monitoramento:',e);res.status(500).json({error:e.message||'Erro ao testar e-mail do monitoramento.'})}
+});
 app.get('/admin/monitoramento/configuracao-alertas',async(req,res)=>{if(!admin(req,res))return;try{res.json({ok:true,config:await obterMonitorAlertConfig()})}catch(e){res.status(500).json({error:e.message||'Erro ao carregar configuração de alertas.'})}});
 app.put('/admin/monitoramento/configuracao-alertas',async(req,res)=>{if(!admin(req,res))return;try{res.json({ok:true,config:await salvarMonitorAlertConfig(req.body||{})})}catch(e){res.status(500).json({error:e.message||'Erro ao salvar configuração de alertas.'})}});
 setTimeout(()=>verificarNovasSalasParaAlertas().catch(()=>{}),5000);
