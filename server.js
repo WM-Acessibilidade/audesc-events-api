@@ -9,7 +9,7 @@ const { RoomServiceClient } = require('livekit-server-sdk');
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '3mb' }));
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
@@ -222,6 +222,7 @@ function defaultFormularioConfig(){
       servicosDisponiveis: basicos.length ? basicos : todos,
       campos: {
         descricao_original: { visivel: true, obrigatorio: false },
+        imagem_evento: { visivel: true, obrigatorio: false },
         categoria_evento: { visivel: true, obrigatorio: true },
         classificacao_etaria: { visivel: true, obrigatorio: false },
         modalidade_evento: { visivel: true, obrigatorio: true },
@@ -3946,9 +3947,91 @@ app.get('/salas/:sala/avaliacao-instantanea/resumo', async (req,res)=>{
  }catch(e){res.status(500).json({error:e.message||'Erro ao consultar avaliacoes.'})}
 });
 
+
+// Fase 6.22 — imagem acessível do evento no Supabase Storage.
+const EVENT_IMAGE_BUCKET='eventos-imagens';
+const EVENT_IMAGE_MAX_BYTES=1572864;
+
+async function garantirBucketImagemEvento(){
+  const sb=getSupabase();
+  const {data,error}=await sb.storage.getBucket(EVENT_IMAGE_BUCKET);
+  if(!error&&data)return;
+  const criado=await sb.storage.createBucket(EVENT_IMAGE_BUCKET,{
+    public:true,
+    fileSizeLimit:EVENT_IMAGE_MAX_BYTES,
+    allowedMimeTypes:['image/jpeg','image/png','image/webp']
+  });
+  if(criado.error&&!String(criado.error.message||'').toLowerCase().includes('already'))throw criado.error;
+}
+function parseDataUrlImagem(dataUrl){
+  const m=String(dataUrl||'').match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\s]+)$/);
+  if(!m)throw new Error('Formato de imagem inválido. Use JPEG, PNG ou WebP.');
+  const mime=m[1],buffer=Buffer.from(m[2].replace(/\s+/g,''),'base64');
+  if(!buffer.length)throw new Error('A imagem está vazia.');
+  if(buffer.length>EVENT_IMAGE_MAX_BYTES)throw new Error('A imagem não pode ultrapassar 1,5 MB.');
+  return {mime,buffer,ext:mime==='image/png'?'png':mime==='image/webp'?'webp':'jpg'};
+}
+async function eventoEditavelPorRequisicao(req,id){
+  const sb=getSupabase();
+  const {data:ev,error}=await sb.from('eventos').select('*').eq('id',id).single();
+  if(error)throw error;
+  if(senhaAdminValida(String(req.headers['x-admin-token']||'')))return {evento:ev,admin:true};
+  const user=await getUser(req);
+  if(!user||!user.email||String(user.email).trim().toLowerCase()!==String(ev.email_usuario||'').trim().toLowerCase()){
+    const err=new Error('Você não tem permissão para alterar a imagem deste evento.');err.status=403;throw err;
+  }
+  return {evento:ev,admin:false};
+}
+async function excluirArquivoImagemEvento(path){
+  if(!path)return;
+  try{await getSupabase().storage.from(EVENT_IMAGE_BUCKET).remove([path])}
+  catch(e){console.warn('Não foi possível remover imagem anterior:',e.message||e)}
+}
+app.post('/eventos/:id/imagem',async(req,res)=>{
+  try{
+    const {evento}=await eventoEditavelPorRequisicao(req,req.params.id);
+    const alt=limit(req.body?.alt,300),dataUrl=String(req.body?.data_url||'');
+    if(dataUrl&&!alt)return res.status(400).json({error:'Informe o texto alternativo da imagem.'});
+    const update={imagem_evento_alt:alt};
+    if(dataUrl){
+      await garantirBucketImagemEvento();
+      const img=parseDataUrlImagem(dataUrl);
+      const path=`${evento.id}/${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${img.ext}`;
+      const up=await getSupabase().storage.from(EVENT_IMAGE_BUCKET).upload(path,img.buffer,{contentType:img.mime,upsert:false,cacheControl:'3600'});
+      if(up.error)throw up.error;
+      const pub=getSupabase().storage.from(EVENT_IMAGE_BUCKET).getPublicUrl(path);
+      update.imagem_evento_url=pub.data.publicUrl;
+      update.imagem_evento_path=path;
+      await excluirArquivoImagemEvento(evento.imagem_evento_path);
+    }else if(!evento.imagem_evento_url){
+      update.imagem_evento_alt='';
+    }
+    const {data,error}=await getSupabase().from('eventos').update({...update,data_ultima_edicao:new Date().toISOString()}).eq('id',evento.id).select().single();
+    if(error)throw error;
+    res.json({ok:true,evento:data});
+  }catch(e){
+    console.error(e);
+    res.status(Number(e.status)||500).json({error:e.message||'Erro ao atualizar imagem do evento.'});
+  }
+});
+app.delete('/eventos/:id/imagem',async(req,res)=>{
+  try{
+    const {evento}=await eventoEditavelPorRequisicao(req,req.params.id);
+    await excluirArquivoImagemEvento(evento.imagem_evento_path);
+    const {data,error}=await getSupabase().from('eventos').update({
+      imagem_evento_url:null,imagem_evento_alt:null,imagem_evento_path:null,data_ultima_edicao:new Date().toISOString()
+    }).eq('id',evento.id).select().single();
+    if(error)throw error;
+    res.json({ok:true,evento:data});
+  }catch(e){
+    console.error(e);
+    res.status(Number(e.status)||500).json({error:e.message||'Erro ao remover imagem do evento.'});
+  }
+});
+
 app.get('/public/eventos', async (req,res)=>{
  try{
-  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,categoria_evento,classificacao_etaria,modalidade_evento,abrangencia_divulgacao,paises_divulgacao,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
+  const {data,error}=await getSupabase().from('eventos').select('id,tipo_servico,servicos_solicitados,tipo_evento,divulgar_acesso_ouvintes,status_publicacao,status_operacao,titulo_original,titulo_publicado,descricao_original,descricao_publicada,imagem_evento_url,imagem_evento_alt,categoria_evento,classificacao_etaria,modalidade_evento,abrangencia_divulgacao,paises_divulgacao,site_oficial,link_ingressos,link_inscricao,link_programacao,link_acessibilidade,data_evento,duracao_horas,max_ouvintes,sala_codigo,pais,uf,pais_codigo,unidade_codigo,timezone,cidade,origem_transmissao,local_evento,latitude,longitude,created_at').eq('status_publicacao','aprovado').order('data_evento',{ascending:true});
   if(error) throw error; res.json({ok:true,eventos:data||[]});
  }catch(e){console.error(e);res.status(500).json({error:e.message||'Erro ao listar eventos públicos.'})}
 });
