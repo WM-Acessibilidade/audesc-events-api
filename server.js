@@ -2779,14 +2779,14 @@ app.get('/admin/emails', async (req,res)=>{
 
   const {data:eventos,error:eventosError}=await sb
    .from('eventos')
-   .select('email_usuario,created_at')
+   .select('email_usuario,created_at,pais,uf,pais_codigo,unidade_codigo')
    .not('email_usuario','is',null)
    .limit(1000);
   if(eventosError) throw eventosError;
 
   const {data:notifs,error:notifsError}=await sb
    .from('notificacoes')
-   .select('email,ativo,email_validado,updated_at,ultimo_envio_em,total_envios,status')
+   .select('email,ativo,email_validado,updated_at,ultimo_envio_em,total_envios,status,pais,uf,pais_codigo,unidade_codigo')
    .not('email','is',null)
    .limit(1000);
   if(notifsError) throw notifsError;
@@ -2827,10 +2827,30 @@ app.get('/admin/emails', async (req,res)=>{
      total_envios:0,
      ultimo_envio:null,
      ultimo_envio_tipo:'',
-     ultimo_envio_status:''
+     ultimo_envio_status:'',
+     primeiro_cadastro_em:null,
+     primeiro_pais:'',
+     primeiro_pais_codigo:'',
+     primeira_unidade:'',
+     primeira_unidade_codigo:''
     });
    }
    return mapa.get(e);
+  }
+
+  function registrarPrimeiroCadastro(item, origem){
+   if(!item || !origem) return;
+   const quando=origem.created_at || origem.updated_at || null;
+   const atual=item.primeiro_cadastro_em ? new Date(item.primeiro_cadastro_em).getTime() : Infinity;
+   const candidato=quando ? new Date(quando).getTime() : Infinity;
+   if(item.primeiro_cadastro_em && !(candidato < atual)) return;
+   if(!item.primeiro_cadastro_em || candidato < atual){
+    item.primeiro_cadastro_em=quando;
+    item.primeiro_pais=text(origem.pais);
+    item.primeiro_pais_codigo=text(origem.pais_codigo).toUpperCase();
+    item.primeira_unidade=text(origem.uf);
+    item.primeira_unidade_codigo=text(origem.unidade_codigo);
+   }
   }
 
   for(const ev of eventos||[]){
@@ -2838,6 +2858,7 @@ app.get('/admin/emails', async (req,res)=>{
    if(item){
     item.origem_eventos=true;
     item.total_eventos++;
+    registrarPrimeiroCadastro(item,ev);
    }
   }
 
@@ -2845,6 +2866,7 @@ app.get('/admin/emails', async (req,res)=>{
    const item=garantir(n.email);
    if(item){
     item.origem_notificacoes=true;
+    registrarPrimeiroCadastro(item,n);
     item.notificacoes_ativas = item.notificacoes_ativas || !!n.ativo;
     item.notificacoes_validadas = item.notificacoes_validadas || !!n.email_validado;
     item.total_envios = Math.max(Number(item.total_envios||0), Number(n.total_envios||0));
