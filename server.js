@@ -1904,18 +1904,39 @@ app.post('/criar-evento', async (req,res)=>{
   const temProfissional=servicos_solicitados.some(servicoRequerAgenda);
   const tipoEventoFinal=temDivulgacao?'publico':tipo_evento;
   const divulgarFinal=temDivulgacao?false:divulgar_acesso_ouvintes;
-  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:(tipoEventoFinal==='publico'&&!usuarioConfiavel)?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,categoria_evento:categoriaEvento,classificacao_etaria:classificacaoEtaria,modalidade_evento:modalidadeEvento,abrangencia_divulgacao:abrangenciaDivulgacao,paises_divulgacao:paisesDivulgacao,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
+  const ev={user_id:user.id,email_usuario:user.email,tipo_servico,servicos_solicitados,tipo_evento:tipoEventoFinal,divulgar_acesso_ouvintes:divulgarFinal,status_publicacao:tipoEventoFinal==='publico'?'pendente':'aprovado',status_pagamento:'pendente',status_agenda:temProfissional?'pendente':'nao_aplicavel',status_operacao:'nao_liberado',titulo_original:titulo,descricao_original:descricaoOriginal,categoria_evento:categoriaEvento,classificacao_etaria:classificacaoEtaria,modalidade_evento:modalidadeEvento,abrangencia_divulgacao:abrangenciaDivulgacao,paises_divulgacao:paisesDivulgacao,site_oficial:safeUrl(b.site_oficial),link_ingressos:safeUrl(b.link_ingressos),link_inscricao:safeUrl(b.link_inscricao),link_programacao:safeUrl(b.link_programacao),link_acessibilidade:safeUrl(b.link_acessibilidade),local_evento:limit(b.local_evento,500),local_nome:limit(b.local_nome,200),local_endereco:limit(b.local_endereco,400),google_place_id:limit(b.google_place_id,255),local_pais_codigo:limit(b.local_pais_codigo,10),local_unidade_codigo:limit(b.local_unidade_codigo,30),latitude:numeroCoordenada(b.latitude),longitude:numeroCoordenada(b.longitude),pais_codigo:paisCodigoEvento,unidade_codigo:unidadeCodigoEvento,timezone:timezoneEvento,cidade:limit(b.cidade,120),pais: paisEvento,
       uf: ufEvento,
       origem_transmissao: origemTransmissaoEvento,
       data_evento:dataEventoNormalizada,duracao_horas:(temTransmissao||temProfissional)?duracao_horas:null,max_ouvintes:temTransmissao?max_ouvintes:null};
   ev.status_pagamento = await statusPagamentoInicial(ev);
   const {data,error}=await getSupabase().from('eventos').insert(ev).select().single();
   if(error) throw error;
-  const email_publicacao_resultado = await notificarInscritosEventoPublicado({}, data).catch(err => {
+  let eventoResposta=data;
+  let aprovacao_confiavel_resultado=null;
+  if(usuarioConfiavel && data.status_pagamento==='dispensado'){
+    aprovacao_confiavel_resultado = await aprovarAutomaticamenteEventoConfiavelAposPagamento(data.id).catch(err => {
+      console.error('Falha na aprovação automática de evento confiável sem cobrança:', err);
+      return {ok:false,error:String(err && err.message ? err.message : err)};
+    });
+    if(aprovacao_confiavel_resultado?.evento) eventoResposta=aprovacao_confiavel_resultado.evento;
+  }
+  const email_publicacao_resultado = aprovacao_confiavel_resultado?.email_publicacao_resultado || await notificarInscritosEventoPublicado({}, eventoResposta).catch(err => {
     console.error('Falha ao notificar inscritos no cadastro do evento:', err);
     return {ok:false,error:String(err && err.message ? err.message : err)};
   });
-  res.json({ok:true,mensagem:tipo_evento==='publico'?'Evento recebido e enviado para curadoria antes da publicação.':'Evento recebido.',evento:data,email_publicacao_resultado});
+  res.json({
+    ok:true,
+    mensagem:tipo_evento==='publico'
+      ?(usuarioConfiavel
+        ?(eventoResposta.status_publicacao==='aprovado'
+          ?'Evento recebido e publicado automaticamente porque não há pagamento pendente.'
+          :'Evento recebido. Por ser de e-mail confiável, será publicado automaticamente após a confirmação do pagamento.')
+        :'Evento recebido e enviado para curadoria antes da publicação.')
+      :'Evento recebido.',
+    evento:eventoResposta,
+    email_publicacao_resultado,
+    aprovacao_confiavel_resultado
+  });
  }catch(e){ console.error(e); res.status(500).json({error:e.message||'Erro ao cadastrar evento.'}); }
 });
 
@@ -4375,8 +4396,46 @@ app.post('/pagamentos/paddle/criar-transacao', async (req,res)=>{
 
 
 
+async function aprovarAutomaticamenteEventoConfiavelAposPagamento(eventoId){
+  const sb = getSupabase();
+  const { data: ev, error } = await sb.from('eventos').select('*').eq('id', eventoId).single();
+  if(error) throw error;
+  if(!ev) throw new Error('Evento não encontrado para aprovação automática.');
+
+  if(text(ev.tipo_evento) !== 'publico') return {ok:false, skipped:true, reason:'Evento privado.'};
+  if(text(ev.status_publicacao) === 'aprovado') return {ok:true, skipped:true, reason:'Evento já aprovado.', evento:ev};
+  if(!['pago','dispensado'].includes(text(ev.status_pagamento))) {
+    return {ok:false, skipped:true, reason:'Pagamento ainda não concluído.', evento:ev};
+  }
+  if(!(await emailConfiavel(ev.email_usuario))) {
+    return {ok:false, skipped:true, reason:'E-mail não está classificado como confiável.', evento:ev};
+  }
+
+  const update = {
+    status_publicacao:'aprovado',
+    titulo_publicado: ev.titulo_publicado || ev.titulo_original || null,
+    descricao_publicada: ev.descricao_publicada || ev.descricao_original || null,
+    data_ultima_edicao:new Date().toISOString()
+  };
+  const { data: aprovado, error: updateError } = await sb.from('eventos').update(update).eq('id', eventoId).select().single();
+  if(updateError) throw updateError;
+
+  const email_publicacao_resultado = await notificarInscritosEventoPublicado(ev, aprovado).catch(err => {
+    console.error('Falha ao notificar inscritos após aprovação automática por e-mail confiável:', err);
+    return {ok:false,error:String(err && err.message ? err.message : err)};
+  });
+
+  return {ok:true, evento:aprovado, email_publicacao_resultado};
+}
+
+
 async function liberarAutomaticamenteAposPagamento(eventoId){
   const sb = getSupabase();
+
+  const aprovacaoConfiavel = await aprovarAutomaticamenteEventoConfiavelAposPagamento(eventoId).catch(e => {
+    console.error('PÓS-PAGAMENTO: falha na aprovação automática de e-mail confiável:', e);
+    return {ok:false,error:String(e && e.message ? e.message : e)};
+  });
 
   const { data: ev, error } = await sb.from('eventos').select('*').eq('id', eventoId).single();
   if(error) throw error;
@@ -4384,7 +4443,7 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
 
   if(!eventoUsaTransmissao(ev)){
     console.log('PÓS-PAGAMENTO: evento não é de transmissão Audesc. Não será gerada sala.', eventoId);
-    return { ok:false, skipped:true, reason:'Evento não é de transmissão Audesc.' };
+    return { ok:true, skipped:true, reason:'Evento não é de transmissão Audesc.', aprovacao_confiavel:aprovacaoConfiavel, evento:ev };
   }
 
   if(ev.status_operacao === 'liberado' && ev.sala_codigo && ev.senha_transmissor){
@@ -4439,7 +4498,7 @@ async function liberarAutomaticamenteAposPagamento(eventoId){
   }
 
   console.log('PÓS-PAGAMENTO: evento liberado automaticamente:', eventoId, up.sala_codigo);
-  return { ok:true, evento:up, senha_transmissor:up.senha_transmissor, sala_codigo:up.sala_codigo, email_resultado };
+  return { ok:true, evento:up, senha_transmissor:up.senha_transmissor, sala_codigo:up.sala_codigo, email_resultado, aprovacao_confiavel:aprovacaoConfiavel };
 }
 
 
