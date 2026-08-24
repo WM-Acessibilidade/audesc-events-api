@@ -5156,4 +5156,78 @@ app.put('/admin/monitoramento/configuracao-alertas',async(req,res)=>{if(!admin(r
 setTimeout(()=>verificarNovasSalasParaAlertas().catch(()=>{}),5000);
 setInterval(()=>verificarNovasSalasParaAlertas().catch(()=>{}),30000);
 
+
+
+// -----------------------------------------------------------------------------
+// Audire Fase 1.0 — repositórios permanentes de audiodescrição.
+// Domínio isolado do Audesc: usa somente tabelas audire_* e rotas /audire/*.
+// -----------------------------------------------------------------------------
+function audirePublicarRepositorioSelect(){
+  return 'id,titulo,descricao,categoria,pais,pais_codigo,unidade_administrativa,unidade_codigo,nome_local,endereco,latitude,longitude,google_place_id,imagem_url,imagem_alt,publicado_em,criado_em,atualizado_em';
+}
+
+app.get('/audire/public/repositorios',async(req,res)=>{
+  try{
+    const sb=getSupabase();
+    const {data,error}=await sb.from('audire_repositorios')
+      .select(audirePublicarRepositorioSelect())
+      .eq('status_publicacao','publicado')
+      .order('publicado_em',{ascending:false,nullsFirst:false})
+      .order('criado_em',{ascending:false});
+    if(error)throw error;
+    res.json({ok:true,repositorios:data||[]});
+  }catch(e){res.status(500).json({error:e.message||'Erro ao carregar repositórios do Audire.'})}
+});
+
+app.get('/audire/public/repositorios/:id',async(req,res)=>{
+  try{
+    const sb=getSupabase();
+    const {data:repo,error}=await sb.from('audire_repositorios')
+      .select(audirePublicarRepositorioSelect())
+      .eq('id',req.params.id).eq('status_publicacao','publicado').maybeSingle();
+    if(error)throw error;
+    if(!repo)return res.status(404).json({error:'Repositório não encontrado.'});
+    const {data:roteiros,error:er}=await sb.from('audire_roteiros')
+      .select('id,titulo,ordem,criado_em')
+      .eq('repositorio_id',repo.id).eq('status_publicacao','publicado')
+      .order('ordem',{ascending:true}).order('criado_em',{ascending:true});
+    if(er)throw er;
+    res.json({ok:true,repositorio:{...repo,roteiros:roteiros||[]}});
+  }catch(e){res.status(500).json({error:e.message||'Erro ao carregar repositório do Audire.'})}
+});
+
+app.get('/audire/public/roteiros/:id',async(req,res)=>{
+  try{
+    const sb=getSupabase();
+    const {data:roteiro,error}=await sb.from('audire_roteiros')
+      .select('id,repositorio_id,titulo,roteiro_texto,imagem_url,audio_url,creditos,ordem,criado_em,atualizado_em')
+      .eq('id',req.params.id).eq('status_publicacao','publicado').maybeSingle();
+    if(error)throw error;
+    if(!roteiro)return res.status(404).json({error:'Roteiro não encontrado.'});
+    const {data:repo,error:er}=await sb.from('audire_repositorios')
+      .select('id,titulo,status_publicacao').eq('id',roteiro.repositorio_id).maybeSingle();
+    if(er)throw er;
+    if(!repo||repo.status_publicacao!=='publicado')return res.status(404).json({error:'Repositório não encontrado ou não publicado.'});
+    res.json({ok:true,roteiro:{...roteiro,repositorio_titulo:repo.titulo}});
+  }catch(e){res.status(500).json({error:e.message||'Erro ao carregar roteiro do Audire.'})}
+});
+
+app.get('/audire/q/:codigo',async(req,res)=>{
+  try{
+    const sb=getSupabase();
+    const {data,error}=await sb.from('audire_qr_codes')
+      .select('codigo,repositorio_id,destino_url,ativo').eq('codigo',req.params.codigo).maybeSingle();
+    if(error)throw error;
+    if(!data||data.ativo!==true)return res.status(404).send('QR Code do Audire não encontrado ou inativo.');
+    let destino=String(data.destino_url||'').trim();
+    if(!destino&&data.repositorio_id){
+      const base=String(process.env.AUDIRE_PUBLIC_BASE_URL||'').replace(/\/$/,'');
+      if(!base)return res.status(503).send('AUDIRE_PUBLIC_BASE_URL não configurada.');
+      destino=base+'/repositorio.html?id='+encodeURIComponent(data.repositorio_id);
+    }
+    if(!/^https?:\/\//i.test(destino))return res.status(400).send('Destino do QR Code inválido.');
+    res.redirect(302,destino);
+  }catch(e){res.status(500).send('Erro ao resolver QR Code do Audire.')}
+});
+
 app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));
