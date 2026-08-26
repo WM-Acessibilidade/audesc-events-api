@@ -8,6 +8,9 @@ const path = require('path');
 const { RoomServiceClient } = require('livekit-server-sdk');
 
 const app = express();
+// Render opera atrás de proxy reverso. Confiar no primeiro proxy permite ao Express
+// interpretar corretamente o IP público encaminhado, sem alterar rotas existentes.
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json({ limit: '3mb' }));
 
@@ -42,9 +45,17 @@ const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 const CACHE_LOCALIZACAO_IP_TTL_MS = 24 * 60 * 60 * 1000;
 const cacheLocalizacaoIp = new Map();
 function ipCliente(req){
-  const encaminhado=String(req.headers['x-forwarded-for']||'').split(',')[0].trim();
-  const real=String(req.headers['x-real-ip']||'').trim();
-  return (encaminhado||real||req.ip||req.socket?.remoteAddress||'').replace(/^::ffff:/,'');
+  // Render e CDNs/proxies podem usar cabeçalhos diferentes. Nunca expomos o IP na resposta.
+  const candidatos=[
+    String(req.headers['cf-connecting-ip']||'').trim(),
+    String(req.headers['true-client-ip']||'').trim(),
+    String(req.headers['x-real-ip']||'').trim(),
+    ...String(req.headers['x-forwarded-for']||'').split(',').map(x=>x.trim()),
+    ...(Array.isArray(req.ips)?req.ips:[]),
+    String(req.ip||'').trim(),
+    String(req.socket?.remoteAddress||'').trim()
+  ].map(x=>x.replace(/^::ffff:/,'')).filter(Boolean);
+  return candidatos.find(x=>!ipPrivadoOuLocal(x)) || candidatos[0] || '';
 }
 function ipPrivadoOuLocal(ip){
   const v=String(ip||'').trim().toLowerCase();
@@ -1654,36 +1665,45 @@ async function sugerirNominatimLocais(query, ctx){
 
 
 
+async function consultarLocalizacaoIp(ip, signal){
+  const tentativas=[
+    async()=>{
+      const resposta=await fetch('https://ipapi.co/'+encodeURIComponent(ip)+'/json/',{headers:{Accept:'application/json','User-Agent':'Audesc-Audire/1.3.1'},signal});
+      const dados=await resposta.json().catch(()=>({}));
+      if(!resposta.ok || dados.error) throw new Error(dados.reason||dados.message||('ipapi HTTP '+resposta.status));
+      return {pais_codigo:String(dados.country_code||dados.country||'').toUpperCase(),pais_nome:String(dados.country_name||''),unidade_codigo:String(dados.region_code||'').toUpperCase(),unidade_nome:String(dados.region||''),provedor:'ipapi'};
+    },
+    async()=>{
+      const resposta=await fetch('https://ipwho.is/'+encodeURIComponent(ip),{headers:{Accept:'application/json','User-Agent':'Audesc-Audire/1.3.1'},signal});
+      const dados=await resposta.json().catch(()=>({}));
+      if(!resposta.ok || dados.success===false) throw new Error(dados.message||('ipwhois HTTP '+resposta.status));
+      return {pais_codigo:String(dados.country_code||'').toUpperCase(),pais_nome:String(dados.country||''),unidade_codigo:String(dados.region_code||'').toUpperCase(),unidade_nome:String(dados.region||''),provedor:'ipwhois'};
+    }
+  ];
+  let ultimoErro=null;
+  for(const tentativa of tentativas){
+    try{const loc=await tentativa();if(loc.pais_codigo)return loc;}catch(e){ultimoErro=e;}
+  }
+  throw ultimoErro||new Error('País não identificado.');
+}
+
 app.get('/localizacao-aproximada', async (req,res)=>{
   const ip=ipCliente(req);
-  if(ipPrivadoOuLocal(ip)) return res.status(503).json({ok:false,error:'Não foi possível identificar a localização aproximada deste acesso.'});
+  if(ipPrivadoOuLocal(ip)) return res.status(503).json({ok:false,error:'Não foi possível identificar o IP público deste acesso.',codigo:'ip_publico_indisponivel'});
   limparCacheLocalizacaoIp();
   const chave=crypto.createHash('sha256').update(ip).digest('hex');
   const salvo=cacheLocalizacaoIp.get(chave);
   if(salvo && salvo.expiraEm>Date.now()) return res.json({ok:true,localizacao:salvo.localizacao,fonte:'cache'});
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),4500);
+  const timer=setTimeout(()=>controller.abort(),6500);
   try{
-    const url='https://ipapi.co/'+encodeURIComponent(ip)+'/json/';
-    const resposta=await fetch(url,{headers:{Accept:'application/json','User-Agent':'Audesc/21.7.0'},signal:controller.signal});
-    const dados=await resposta.json().catch(()=>({}));
-    if(!resposta.ok || dados.error) throw new Error(dados.reason||dados.message||('HTTP '+resposta.status));
-    const paisCodigo=String(dados.country_code||'').toUpperCase();
-    const unidadeCodigo=String(dados.region_code||'').toUpperCase();
-    if(!paisCodigo) throw new Error('País não identificado.');
-    const localizacao={
-      pais_codigo:paisCodigo,
-      pais_nome:String(dados.country_name||''),
-      unidade_codigo:unidadeCodigo,
-      unidade_nome:String(dados.region||''),
-      fonte:'ip',
-      aproximada:true
-    };
+    const dados=await consultarLocalizacaoIp(ip,controller.signal);
+    const localizacao={pais_codigo:dados.pais_codigo,pais_nome:dados.pais_nome,unidade_codigo:dados.unidade_codigo,unidade_nome:dados.unidade_nome,fonte:'ip',aproximada:true};
     cacheLocalizacaoIp.set(chave,{localizacao,expiraEm:Date.now()+CACHE_LOCALIZACAO_IP_TTL_MS});
-    return res.json({ok:true,localizacao,fonte:'ip'});
+    return res.json({ok:true,localizacao,fonte:dados.provedor||'ip'});
   }catch(e){
     console.warn('Localização aproximada por IP indisponível:',e.message||e);
-    return res.status(503).json({ok:false,error:'Localização aproximada temporariamente indisponível.'});
+    return res.status(503).json({ok:false,error:'Localização aproximada temporariamente indisponível.',codigo:'provedores_indisponiveis'});
   }finally{clearTimeout(timer);}
 });
 app.get('/geocode/sugestoes', async (req,res)=>{
