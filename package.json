@@ -1,6 +1,6 @@
 {
   "name": "audesc-events-api",
-  "version": "21.12.0",
+  "version": "21.13.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,8 +11,7 @@
     "express": "^4.18.2",
     "googleapis": "^140.0.1",
     "livekit-server-sdk": "^2.13.3",
-    "qrcode": "^1.5.4",
-    "@breezystack/lamejs": "^1.2.7"
+    "qrcode": "^1.5.4"
   },
   "engines": {
     "node": ">=18"
