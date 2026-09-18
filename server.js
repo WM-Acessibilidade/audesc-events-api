@@ -5216,6 +5216,29 @@ function audireLocalIgual(codigoA,nomeA,codigoB,nomeB){const ca=audireLocalChave
 function audireRoteiroCompativelRepositorio(roteiro,repo){const temPais=!!audireLocalChave(roteiro?.pais_codigo||roteiro?.pais);if(!temPais)return true;if(!audireLocalIgual(roteiro?.pais_codigo,roteiro?.pais,repo?.pais_codigo,repo?.pais))return false;const temUnidade=!!audireLocalChave(roteiro?.unidade_codigo||roteiro?.unidade_administrativa);if(!temUnidade)return true;return audireLocalIgual(roteiro?.unidade_codigo,roteiro?.unidade_administrativa,repo?.unidade_codigo,repo?.unidade_administrativa);}
 function audireOrdenarRoteirosRepositorio(lista){return [...(lista||[])].sort((a,b)=>{const ao=Math.max(0,Number(a?.ordem)||0),bo=Math.max(0,Number(b?.ordem)||0);if(ao>0||bo>0){if(ao===0)return 1;if(bo===0)return -1;if(ao!==bo)return ao-bo}const ad=Date.parse(a?.vinculado_em||a?.criado_em||0)||0,bd=Date.parse(b?.vinculado_em||b?.criado_em||0)||0;if(ad!==bd)return ad-bd;return String(a?.titulo||'').localeCompare(String(b?.titulo||''),'pt-BR',{sensitivity:'base'})});}
 
+// Audire — diagnóstico isolado do Google Cloud Text-to-Speech.
+// Não altera o fluxo Gemini. Usa exclusivamente o Secret File criado no Render.
+const AUDIRE_CLOUD_TTS_CREDENTIALS_FILE=process.env.AUDIRE_CLOUD_TTS_CREDENTIALS_FILE||'/etc/secrets/audire-cloud-tts.json';
+async function audireCloudTtsCliente(){
+  if(!fs.existsSync(AUDIRE_CLOUD_TTS_CREDENTIALS_FILE))throw new Error(`Credencial do Cloud TTS não encontrada em ${AUDIRE_CLOUD_TTS_CREDENTIALS_FILE}.`);
+  const auth=new google.auth.GoogleAuth({keyFile:AUDIRE_CLOUD_TTS_CREDENTIALS_FILE,scopes:['https://www.googleapis.com/auth/cloud-platform']});
+  return auth.getClient();
+}
+async function audireCloudTtsListarVozesPtBr(){
+  const cliente=await audireCloudTtsCliente();
+  const r=await cliente.request({url:'https://texttospeech.googleapis.com/v1/voices',method:'GET',params:{languageCode:'pt-BR'}});
+  const vozes=Array.isArray(r.data?.voices)?r.data.voices:[];
+  return vozes.map(v=>({name:String(v.name||''),ssmlGender:String(v.ssmlGender||''),naturalSampleRateHertz:Number(v.naturalSampleRateHertz||0),languageCodes:Array.isArray(v.languageCodes)?v.languageCodes:[]}));
+}
+async function audireCloudTtsDiagnosticoInicial(){
+  if(!fs.existsSync(AUDIRE_CLOUD_TTS_CREDENTIALS_FILE))return console.log('[Audire Cloud TTS] Secret File ainda não encontrado; diagnóstico ignorado.');
+  try{
+    const vozes=await audireCloudTtsListarVozesPtBr(),chirp=vozes.filter(v=>/Chirp3-HD/i.test(v.name)),wavenet=vozes.filter(v=>/Wavenet/i.test(v.name));
+    console.log('[Audire Cloud TTS] Autenticação e API OK.',{ptBR:vozes.length,chirp3HD:chirp.length,waveNet:wavenet.length,chirp3HDVozes:chirp.map(v=>v.name),waveNetVozes:wavenet.map(v=>v.name)});
+  }catch(e){console.error('[Audire Cloud TTS] Diagnóstico falhou:',e?.response?.data?.error?.message||e.message||e)}
+}
+app.get('/audire/admin/tts/cloud/diagnostico',async(req,res)=>{if(!admin(req,res))return;try{const vozes=await audireCloudTtsListarVozesPtBr(),chirp=vozes.filter(v=>/Chirp3-HD/i.test(v.name)),wavenet=vozes.filter(v=>/Wavenet/i.test(v.name));res.json({ok:true,credencial:'secret-file',idioma:'pt-BR',total:vozes.length,chirp3_hd:chirp,wavenet})}catch(e){res.status(Number(e?.response?.status)||500).json({error:e?.response?.data?.error?.message||e.message||'Falha no diagnóstico do Cloud Text-to-Speech.'})}});
+
 // Audire Fase 1.5 — síntese de voz modular. Primeiro provedor: Google Gemini TTS.
 const AUDIRE_TTS_GOOGLE_VOZES=['Zephyr','Puck','Charon','Kore','Fenrir','Leda','Orus','Aoede','Callirrhoe','Autonoe','Enceladus','Iapetus','Umbriel','Algieba','Despina','Erinome','Algenib','Rasalgethi','Laomedeia','Achernar','Alnilam','Schedar','Gacrux','Pulcherrima','Achird','Zubenelgenubi','Vindemiatrix','Sadachbia','Sadaltager','Sulafat'];
 function audireTtsGoogleModelo(){return limit(process.env.AUDIRE_TTS_GOOGLE_MODEL,120)||'gemini-3.1-flash-tts-preview';}
@@ -5341,4 +5364,4 @@ app.post('/audire/admin/roteiros/:id/qr',async(req,res)=>{if(!admin(req,res))ret
 app.patch('/audire/admin/qr/:id',async(req,res)=>{if(!admin(req,res))return;try{const up={atualizado_em:new Date().toISOString()};if('destino_url'in(req.body||{}))up.destino_url=limit(req.body.destino_url,1000)||null;if('ativo'in(req.body||{}))up.ativo=req.body.ativo!==false;const {data,error}=await getSupabase().from('audire_qr_codes').update(up).eq('id',req.params.id).select().single();if(error)throw error;res.json({ok:true,qr:data})}catch(e){res.status(500).json({error:e.message||'Erro ao atualizar QR Code.'})}});
 app.get('/audire/public/qr/:codigo.svg',async(req,res)=>{try{const sb=getSupabase();const {data,error}=await sb.from('audire_qr_codes').select('codigo,ativo').eq('codigo',req.params.codigo).maybeSingle();if(error)throw error;if(!data||data.ativo!==true)return res.status(404).send('QR Code não encontrado.');const QRCode=require('qrcode'),base=String(process.env.AUDIRE_API_PUBLIC_URL||process.env.RENDER_EXTERNAL_URL||'https://audesc-events-api.onrender.com').replace(/\/$/,''),url=base+'/audire/q/'+encodeURIComponent(req.params.codigo),svg=await QRCode.toString(url,{type:'svg',margin:2,width:360,errorCorrectionLevel:'M'});res.type('image/svg+xml').set('Cache-Control','public, max-age=3600').send(svg)}catch(e){res.status(500).send('Erro ao gerar QR Code.')}});
 
-app.listen(PORT,()=>console.log(`Audesc Events API rodando na porta ${PORT}`));
+app.listen(PORT,()=>{console.log(`Audesc Events API rodando na porta ${PORT}`);audireCloudTtsDiagnosticoInicial();});
