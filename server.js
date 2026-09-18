@@ -5239,6 +5239,25 @@ async function audireCloudTtsDiagnosticoInicial(){
 }
 app.get('/audire/admin/tts/cloud/diagnostico',async(req,res)=>{if(!admin(req,res))return;try{const vozes=await audireCloudTtsListarVozesPtBr(),chirp=vozes.filter(v=>/Chirp3-HD/i.test(v.name)),wavenet=vozes.filter(v=>/Wavenet/i.test(v.name));res.json({ok:true,credencial:'secret-file',idioma:'pt-BR',total:vozes.length,chirp3_hd:chirp,wavenet})}catch(e){res.status(Number(e?.response?.status)||500).json({error:e?.response?.data?.error?.message||e.message||'Falha no diagnóstico do Cloud Text-to-Speech.'})}});
 
+// Audire — amostras isoladas Cloud TTS. Não altera nem reutiliza o fluxo Gemini.
+// O texto e as duas vozes são fixos; a rota permanece administrativa para evitar consumo público da API.
+const AUDIRE_CLOUD_TTS_AMOSTRA_TEXTO='No centro da sala, uma janela ampla deixa entrar a luz da tarde. Sobre a mesa de madeira, um livro aberto repousa ao lado de uma pequena xícara. Ao fundo, as folhas das árvores se movem suavemente com o vento.';
+const AUDIRE_CLOUD_TTS_AMOSTRAS={
+  chirp:{nome:'Chirp 3 HD — Kore',voz:'pt-BR-Chirp3-HD-Kore'},
+  wavenet:{nome:'WaveNet — A',voz:'pt-BR-Wavenet-A'}
+};
+async function audireCloudTtsSintetizarAmostra(tipo){
+  const item=AUDIRE_CLOUD_TTS_AMOSTRAS[String(tipo||'').toLowerCase()];
+  if(!item)throw Object.assign(new Error('Amostra inválida. Use chirp ou wavenet.'),{status:400});
+  const cliente=await audireCloudTtsCliente();
+  const r=await cliente.request({url:'https://texttospeech.googleapis.com/v1/text:synthesize',method:'POST',data:{input:{text:AUDIRE_CLOUD_TTS_AMOSTRA_TEXTO},voice:{languageCode:'pt-BR',name:item.voz},audioConfig:{audioEncoding:'LINEAR16'}}});
+  const b64=String(r.data?.audioContent||'');
+  if(!b64)throw new Error('O Cloud Text-to-Speech não retornou conteúdo de áudio.');
+  return {item,audio:Buffer.from(b64,'base64')};
+}
+app.get('/audire/admin/tts/cloud/amostra/:tipo',async(req,res)=>{if(!admin(req,res))return;try{const a=await audireCloudTtsSintetizarAmostra(req.params.tipo);res.set({'Content-Type':'audio/wav','Content-Disposition':`inline; filename="audire-${String(req.params.tipo).toLowerCase()}-pt-br.wav"`,'Cache-Control':'no-store','X-Audire-Cloud-TTS-Voice':a.item.voz,'Access-Control-Expose-Headers':'X-Audire-Cloud-TTS-Voice'}).send(a.audio)}catch(e){res.status(Number(e.status||e?.response?.status)||500).json({error:e?.response?.data?.error?.message||e.message||'Falha ao sintetizar amostra do Cloud Text-to-Speech.'})}});
+
+
 // Audire Fase 1.5 — síntese de voz modular. Primeiro provedor: Google Gemini TTS.
 const AUDIRE_TTS_GOOGLE_VOZES=['Zephyr','Puck','Charon','Kore','Fenrir','Leda','Orus','Aoede','Callirrhoe','Autonoe','Enceladus','Iapetus','Umbriel','Algieba','Despina','Erinome','Algenib','Rasalgethi','Laomedeia','Achernar','Alnilam','Schedar','Gacrux','Pulcherrima','Achird','Zubenelgenubi','Vindemiatrix','Sadachbia','Sadaltager','Sulafat'];
 function audireTtsGoogleModelo(){return limit(process.env.AUDIRE_TTS_GOOGLE_MODEL,120)||'gemini-3.1-flash-tts-preview';}
