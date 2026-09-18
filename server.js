@@ -5257,6 +5257,33 @@ async function audireCloudTtsSintetizarAmostra(tipo){
 }
 app.get('/audire/admin/tts/cloud/amostra/:tipo',async(req,res)=>{if(!admin(req,res))return;try{const a=await audireCloudTtsSintetizarAmostra(req.params.tipo);res.set({'Content-Type':'audio/wav','Content-Disposition':`inline; filename="audire-${String(req.params.tipo).toLowerCase()}-pt-br.wav"`,'Cache-Control':'no-store','X-Audire-Cloud-TTS-Voice':a.item.voz,'Access-Control-Expose-Headers':'X-Audire-Cloud-TTS-Voice'}).send(a.audio)}catch(e){res.status(Number(e.status||e?.response?.status)||500).json({error:e?.response?.data?.error?.message||e.message||'Falha ao sintetizar amostra do Cloud Text-to-Speech.'})}});
 
+// Página temporária e acessível para audição comparativa das amostras Cloud TTS.
+// O token é mantido apenas na memória desta página e enviado no cabeçalho; não é gravado em URL ou storage.
+app.get('/audire/admin/tts/cloud/amostras',(_req,res)=>res.type('html').send(`<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Audire — teste Cloud TTS</title></head><body>
+<main><h1>Audire — teste de vozes Google Cloud TTS</h1>
+<p>Esta página temporária gera duas amostras com o mesmo texto. Informe o token administrativo somente nesta página. Ele não será salvo.</p>
+<label for="token">Token administrativo</label><br><input id="token" type="password" autocomplete="off">
+<p id="estado" role="status" aria-live="polite"></p>
+<section aria-labelledby="chirp-t"><h2 id="chirp-t">Chirp 3 HD — Kore</h2><p>Voz: pt-BR-Chirp3-HD-Kore</p><button type="button" data-tipo="chirp">Gerar amostra Chirp 3 HD</button><div id="chirp-player"></div></section>
+<section aria-labelledby="wavenet-t"><h2 id="wavenet-t">WaveNet — A</h2><p>Voz: pt-BR-Wavenet-A</p><button type="button" data-tipo="wavenet">Gerar amostra WaveNet</button><div id="wavenet-player"></div></section>
+<h2>Texto usado nas duas amostras</h2><p>${AUDIRE_CLOUD_TTS_AMOSTRA_TEXTO}</p>
+</main><script>
+let urls={};
+async function gerar(tipo,botao){
+ const token=document.getElementById('token').value.trim(),estado=document.getElementById('estado');
+ if(!token){estado.textContent='Informe o token administrativo.';document.getElementById('token').focus();return;}
+ botao.disabled=true;estado.textContent='Gerando amostra '+(tipo==='chirp'?'Chirp 3 HD':'WaveNet')+'…';
+ try{const r=await fetch('/audire/admin/tts/cloud/amostra/'+tipo,{headers:{'x-admin-token':token}});if(!r.ok){let m='Falha ao gerar a amostra.';try{const j=await r.json();m=j.error||m}catch{}throw new Error(m)}
+ const blob=await r.blob();if(urls[tipo])URL.revokeObjectURL(urls[tipo]);urls[tipo]=URL.createObjectURL(blob);
+ const alvo=document.getElementById(tipo+'-player');alvo.replaceChildren();const audio=document.createElement('audio');audio.controls=true;audio.preload='metadata';audio.src=urls[tipo];audio.setAttribute('aria-label','Amostra '+(tipo==='chirp'?'Chirp 3 HD — Kore':'WaveNet — A'));alvo.appendChild(audio);estado.textContent='Amostra pronta. Use os controles de áudio abaixo do título da voz.';audio.focus();
+ }catch(e){estado.textContent=e.message||'Falha ao gerar a amostra.'}finally{botao.disabled=false}
+}
+document.querySelectorAll('button[data-tipo]').forEach(b=>b.addEventListener('click',()=>gerar(b.dataset.tipo,b)));
+</script></body></html>`));
+
+
 
 // Audire Fase 1.5 — síntese de voz modular. Primeiro provedor: Google Gemini TTS.
 const AUDIRE_TTS_GOOGLE_VOZES=['Zephyr','Puck','Charon','Kore','Fenrir','Leda','Orus','Aoede','Callirrhoe','Autonoe','Enceladus','Iapetus','Umbriel','Algieba','Despina','Erinome','Algenib','Rasalgethi','Laomedeia','Achernar','Alnilam','Schedar','Gacrux','Pulcherrima','Achird','Zubenelgenubi','Vindemiatrix','Sadachbia','Sadaltager','Sulafat'];
